@@ -2,8 +2,12 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import {
   CalendarDays,
+  CheckCircle2,
+  CircleAlert,
+  ClipboardList,
   Download,
   FileText,
+  LoaderCircle,
   NotebookTabs,
   Pencil,
   Plus,
@@ -98,7 +102,7 @@ function App() {
   }
 
   return (
-    <main className="app-shell">
+    <main className={loading ? "app-shell is-loading" : "app-shell"}>
       <aside className="sidebar">
         <div className="brand">
           <NotebookTabs size={26} />
@@ -123,19 +127,22 @@ function App() {
         </nav>
       </aside>
 
-      <section className="workspace">
+      <section className="workspace" aria-busy={loading}>
         <header className="topbar">
           <div>
-            <p className="eyebrow">{loading ? "同步中" : "本地自托管"}</p>
+            <p className="eyebrow status-line" aria-live="polite">
+              {loading ? <LoaderCircle className="spin" size={14} /> : <CheckCircle2 size={14} />}
+              {loading ? "正在同步本地数据" : "本地工作空间"}
+            </p>
             <h1>{tabTitle(tab)}</h1>
           </div>
-          <button className="icon-button" type="button" title="刷新" onClick={() => void refresh()}>
+          <button className="icon-button" type="button" title="刷新数据" aria-label="刷新数据" disabled={loading} onClick={() => void refresh()}>
             <RefreshCw size={18} />
           </button>
         </header>
 
-        {notice && <div className="notice">{notice}</div>}
-        {error && <div className="error">{error}</div>}
+        {notice && <div className="notice" role="status"><CheckCircle2 size={17} />{notice}</div>}
+        {error && <div className="error" role="alert"><CircleAlert size={17} />{error}</div>}
 
         {tab === "logs" && (
           <WorkLogsPage
@@ -203,7 +210,7 @@ function tabTitle(tab: Tab) {
 
 function TabButton(props: { active: boolean; icon: React.ReactNode; onClick: () => void; children: React.ReactNode }) {
   return (
-    <button type="button" className={props.active ? "tab active" : "tab"} onClick={props.onClick}>
+    <button type="button" className={props.active ? "tab active" : "tab"} aria-current={props.active ? "page" : undefined} onClick={props.onClick}>
       {props.icon}
       <span>{props.children}</span>
     </button>
@@ -290,10 +297,25 @@ function WorkLogsPage(props: {
     setForm(emptyForm());
   }
 
+  async function deleteItem(item: WorkLog) {
+    const confirmed = window.confirm(`删除工作记录「${item.task}」？`);
+    if (confirmed) {
+      await props.onDelete(item.id);
+    }
+  }
+
   return (
     <div className="two-column">
       <form className="panel form-grid" onSubmit={submit}>
-        <h2>{editingId ? "编辑记录" : "新增记录"}</h2>
+        <div className="panel-heading full">
+          <div>
+            <p className="section-eyebrow">每日工作日志</p>
+            <h2>{editingId ? "编辑记录" : "新增记录"}</h2>
+          </div>
+          {editingId && <span className="status-badge">编辑中</span>}
+        </div>
+        <p className="form-hint full"><span aria-hidden="true">*</span> 为必填项</p>
+        <p className="form-section-title full">基本信息</p>
         <label>
           开始日期
           <input
@@ -318,11 +340,11 @@ function WorkLogsPage(props: {
           />
         </label>
         <label>
-          项目
+          项目 <em aria-hidden="true">*</em>
           <input value={form.project} onChange={(event) => setField("project", event.target.value)} required />
         </label>
         <label>
-          事项
+          事项 <em aria-hidden="true">*</em>
           <input value={form.task} onChange={(event) => setField("task", event.target.value)} required />
         </label>
         <label>
@@ -339,9 +361,10 @@ function WorkLogsPage(props: {
           <input type="number" min="0" max="24" step="0.25" value={form.hours} onChange={(event) => setField("hours", event.target.value)} />
         </label>
         <label className="full">
-          进展
+          进展 <em aria-hidden="true">*</em>
           <textarea value={form.progress} onChange={(event) => setField("progress", event.target.value)} required />
         </label>
+        <p className="form-section-title full">复盘与补充</p>
         <label className="full">
           结果
           <textarea value={form.result} onChange={(event) => setField("result", event.target.value)} />
@@ -369,14 +392,21 @@ function WorkLogsPage(props: {
       </form>
 
       <section className="list-panel">
+        <div className="list-panel-header">
+          <div>
+            <p className="section-eyebrow">历史记录</p>
+            <h2>工作记录</h2>
+          </div>
+          <span className="count-badge">{props.meta.total} 条</span>
+        </div>
         {props.items.map((item) => (
           <article className="row-card" key={item.id}>
             <div>
               <div className="row-meta">
-                <span>{dateRangeLabel(item)}</span>
-                <span>{item.project}</span>
-                <span>{priorityLabel(item.priority)}</span>
-                {item.hours != null && <span>{item.hours}h</span>}
+                <span className="meta-date">{dateRangeLabel(item)}</span>
+                <span className="meta-project">{item.project}</span>
+                <span className={`priority-badge priority-${item.priority}`}>{priorityLabel(item.priority)}</span>
+                {item.hours != null && <span className="hours-badge">{item.hours}h</span>}
               </div>
               <h3>{item.task}</h3>
               <p>{item.progress}</p>
@@ -384,16 +414,24 @@ function WorkLogsPage(props: {
               {item.blockers && <p className="warning">阻塞：{item.blockers}</p>}
             </div>
             <div className="row-actions">
-              <button className="icon-button" type="button" title="编辑" onClick={() => startEdit(item)}>
+              <button className="icon-button" type="button" title="编辑记录" aria-label={`编辑记录：${item.task}`} onClick={() => startEdit(item)}>
                 <Pencil size={16} />
               </button>
-              <button className="icon-button danger" type="button" title="删除" onClick={() => void props.onDelete(item.id)}>
+              <button className="icon-button danger" type="button" title="删除记录" aria-label={`删除记录：${item.task}`} onClick={() => void deleteItem(item)}>
                 <Trash2 size={16} />
               </button>
             </div>
           </article>
         ))}
-        {props.items.length === 0 && <p className="empty">暂无工作记录。</p>}
+        {props.items.length === 0 && (
+          <div className="empty-state">
+            <ClipboardList size={28} />
+            <div>
+              <strong>还没有工作记录</strong>
+              <p>从左侧填写今天的进展，记录会保存在这里。</p>
+            </div>
+          </div>
+        )}
         <div className="pagination">
           <span>
             共 {props.meta.total} 条 · 第 {props.meta.page} / {props.meta.total_pages} 页
@@ -491,38 +529,61 @@ function ReportsPage(props: {
 
   return (
     <div className="reports-layout">
-      <section className="panel generate-bar">
-        <select value={type} disabled={isGenerating} onChange={(event) => setType(event.target.value as ReportType)}>
-          {Object.entries(reportLabels).map(([key, label]) => (
-            <option key={key} value={key}>
-              {label}
-            </option>
-          ))}
-        </select>
-        <input type="date" value={anchor} disabled={isGenerating} onChange={(event) => setAnchor(event.target.value)} />
-        <select value={templateId} disabled={isGenerating} onChange={(event) => setTemplateId(event.target.value)}>
-          <option value="">默认模板</option>
-          {props.templates
-            .filter((template) => template.template_type === type)
-            .map((template) => (
-              <option key={template.id} value={template.id}>
-                {template.name}
-              </option>
-            ))}
-        </select>
-        <button
-          className="primary"
-          type="button"
-          disabled={isGenerating}
-          onClick={() => void generateDraft()}
-        >
-          <RefreshCw className={isGenerating ? "spin" : undefined} size={18} />
-          {isGenerating ? "生成中" : "生成草稿"}
-        </button>
+      <section className="panel generation-panel">
+        <div className="generation-copy">
+          <p className="section-eyebrow">AI 报告助手</p>
+          <h2>生成新草稿</h2>
+          <p>按周期汇总已有工作记录，并以选定模板生成可编辑内容。</p>
+        </div>
+        <div className="generate-bar">
+          <label className="compact-field">
+            报告类型
+            <select value={type} disabled={isGenerating} onChange={(event) => setType(event.target.value as ReportType)}>
+              {Object.entries(reportLabels).map(([key, label]) => (
+                <option key={key} value={key}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="compact-field">
+            参考日期
+            <input type="date" value={anchor} disabled={isGenerating} onChange={(event) => setAnchor(event.target.value)} />
+          </label>
+          <label className="compact-field">
+            使用模板
+            <select value={templateId} disabled={isGenerating} onChange={(event) => setTemplateId(event.target.value)}>
+              <option value="">默认模板</option>
+              {props.templates
+                .filter((template) => template.template_type === type)
+                .map((template) => (
+                  <option key={template.id} value={template.id}>
+                    {template.name}
+                  </option>
+                ))}
+            </select>
+          </label>
+          <button
+            className="primary"
+            type="button"
+            disabled={isGenerating}
+            onClick={() => void generateDraft()}
+          >
+            <RefreshCw className={isGenerating ? "spin" : undefined} size={18} />
+            {isGenerating ? "生成中" : "生成草稿"}
+          </button>
+        </div>
       </section>
 
       <div className="report-grid">
         <section className="list-panel">
+          <div className="list-panel-header">
+            <div>
+              <p className="section-eyebrow">已生成内容</p>
+              <h2>报告草稿</h2>
+            </div>
+            <span className="count-badge">{props.reports.length} 份</span>
+          </div>
           {props.reports.map((item) => (
             <button
               type="button"
@@ -531,12 +592,23 @@ function ReportsPage(props: {
               onClick={() => setSelectedId(item.id)}
             >
               <strong>{item.title}</strong>
-              <span>
-                {reportLabels[item.report_type]} · {item.period_start} 至 {item.period_end}
-              </span>
+              <span className="report-item-meta"><b>{reportLabels[item.report_type]}</b>{item.period_start} 至 {item.period_end}</span>
             </button>
           ))}
-          {props.reports.length === 0 && <p className="empty">暂无报告草稿。</p>}
+          {props.reports.length === 0 && (
+            <div className="empty-state report-empty-state">
+              <FileText size={28} />
+              <div>
+                <strong>还没有报告草稿</strong>
+                <p>选择报告类型与参考日期，即可生成第一份草稿。</p>
+              </div>
+              <div className="empty-steps" aria-label="生成报告步骤">
+                <span>选择类型</span>
+                <span>确认日期</span>
+                <span>生成草稿</span>
+              </div>
+            </div>
+          )}
         </section>
 
         {selected && (
@@ -564,13 +636,14 @@ function ReportsPage(props: {
                   预览
                 </button>
               </div>
-              <a className="icon-button" title="导出 DOCX" href={docxUrl(selected.id)}>
+              <a className="icon-button" title="导出 DOCX" aria-label="导出 DOCX" href={docxUrl(selected.id)}>
                 <Download size={18} />
               </a>
               <button
                 className="icon-button"
                 type="button"
                 title="保存草稿到本地数据库"
+                aria-label="保存草稿"
                 onClick={() => void props.onSave(selected.id, { title: draftTitle, content_markdown: draft })}
               >
                 <Save size={18} />
@@ -579,6 +652,7 @@ function ReportsPage(props: {
                 className="icon-button danger"
                 type="button"
                 title="删除草稿"
+                aria-label="删除草稿"
                 onClick={() => void deleteSelectedReport()}
               >
                 <Trash2 size={18} />
@@ -593,6 +667,14 @@ function ReportsPage(props: {
                 <MarkdownPreview content={draft} />
               </div>
             )}
+          </section>
+        )}
+        {!selected && (
+          <section className="editor-empty">
+            <FileText size={32} />
+            <span className="empty-kicker">准备就绪</span>
+            <h2>报告将在这里编辑</h2>
+            <p>生成或选择一份报告草稿后，可以在这里修改内容、预览 Markdown 并导出 DOCX。</p>
           </section>
         )}
       </div>
@@ -882,25 +964,46 @@ function TemplatesPage(props: {
     }
   }
 
+  async function deleteTemplate() {
+    if (!selected) {
+      return;
+    }
+    const confirmed = window.confirm(`删除模板「${selected.name}」？`);
+    if (confirmed) {
+      await props.onDelete(selected.id);
+    }
+  }
+
   return (
     <div className="report-grid">
       <section className="list-panel">
+        <div className="list-panel-header">
+          <div>
+            <p className="section-eyebrow">可复用格式</p>
+            <h2>报告模板</h2>
+          </div>
+          <span className="count-badge">{props.templates.length} 个</span>
+        </div>
         <button className={selectedId === "new" ? "report-item active" : "report-item"} type="button" onClick={() => setSelectedId("new")}>
           <strong>新建模板</strong>
-          <span>Markdown + Jinja 变量</span>
+          <span className="report-item-meta"><b>自定义</b>Markdown + Jinja 变量</span>
         </button>
         {props.templates.map((item) => (
           <button className={selected?.id === item.id ? "report-item active" : "report-item"} type="button" key={item.id} onClick={() => setSelectedId(item.id)}>
             <strong>{item.name}</strong>
-            <span>
-              {reportLabels[item.template_type]}
-              {item.is_default ? " · 默认" : ""}
-            </span>
+            <span className="report-item-meta"><b>{reportLabels[item.template_type]}</b>{item.is_default ? "默认模板" : "自定义模板"}</span>
           </button>
         ))}
       </section>
 
       <section className="template-editor form-grid">
+        <div className="panel-heading full">
+          <div>
+            <p className="section-eyebrow">模板编辑器</p>
+            <h2>{selected ? "编辑模板" : "创建模板"}</h2>
+          </div>
+          {selected?.is_default && <span className="status-badge">默认模板</span>}
+        </div>
         <label>
           模板名称
           <input value={form.name} onChange={(event) => setField("name", event.target.value)} />
@@ -960,7 +1063,7 @@ function TemplatesPage(props: {
             保存模板
           </button>
           {selected && (
-            <button className="secondary danger" type="button" onClick={() => void props.onDelete(selected.id)}>
+            <button className="secondary danger" type="button" onClick={() => void deleteTemplate()}>
               <Trash2 size={18} />
               删除模板
             </button>
@@ -980,6 +1083,7 @@ function SettingsPage(props: { setting: LlmSetting | null; onSave: (payload: Llm
     extra_headers: {}
   });
   const [headersText, setHeadersText] = React.useState("{}");
+  const [headersError, setHeadersError] = React.useState("");
 
   React.useEffect(() => {
     if (props.setting) {
@@ -997,50 +1101,97 @@ function SettingsPage(props: { setting: LlmSetting | null; onSave: (payload: Llm
     }));
   }
 
-  async function save() {
+  async function save(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
     let extra_headers: Record<string, string> = {};
-    if (headersText.trim()) {
-      extra_headers = JSON.parse(headersText);
+    try {
+      if (headersText.trim()) {
+        const parsed: unknown = JSON.parse(headersText);
+        if (!parsed || Array.isArray(parsed) || typeof parsed !== "object" || Object.values(parsed).some((value) => typeof value !== "string")) {
+          throw new Error("扩展请求头必须是一个键和值均为文本的 JSON 对象。");
+        }
+        extra_headers = parsed as Record<string, string>;
+      }
+    } catch (error) {
+      setHeadersError(error instanceof Error ? error.message : "扩展请求头格式无效。");
+      return;
     }
+    setHeadersError("");
     await props.onSave({ ...form, extra_headers });
   }
 
   return (
-    <section className="panel settings-panel">
-      <label>
-        Provider
-        <select value={form.provider} onChange={(event) => setProvider(event.target.value as Provider)}>
-          <option value="openai">OpenAI</option>
-          <option value="nvidia">NVIDIA</option>
-          <option value="openrouter">OpenRouter</option>
-        </select>
-      </label>
-      <label>
-        Base URL
-        <input value={form.base_url} onChange={(event) => setForm({ ...form, base_url: event.target.value })} />
-      </label>
-      <label>
-        Model
-        <input value={form.model} onChange={(event) => setForm({ ...form, model: event.target.value })} />
-      </label>
-      <label>
-        API Key
-        <input
-          type="password"
-          placeholder={props.setting?.api_key ? `当前：${props.setting.api_key}` : ""}
-          value={form.api_key ?? ""}
-          onChange={(event) => setForm({ ...form, api_key: event.target.value })}
-        />
-      </label>
-      <label>
-        Extra Headers JSON
-        <textarea value={headersText} onChange={(event) => setHeadersText(event.target.value)} />
-      </label>
-      <button className="primary" type="button" onClick={() => void save()}>
-        <Save size={18} />
-        保存设置
-      </button>
-    </section>
+    <form className="panel settings-panel" onSubmit={(event) => void save(event)}>
+      <div className="settings-intro">
+        <p className="section-eyebrow">本地配置</p>
+        <h2>LLM 设置</h2>
+        <p>配置一个兼容 OpenAI API 的服务，用于生成报告和从示例提炼模板。</p>
+        <div className="settings-side-note">
+          <span>保存提示</span>
+          <strong>未填写的密钥会保留</strong>
+          <p>保存服务地址或模型时，无需再次输入当前 API Key。</p>
+        </div>
+      </div>
+
+      <fieldset className="settings-section">
+        <legend>模型服务</legend>
+        <p>切换服务商会自动填入推荐的 Base URL 与模型名称，你仍可按实际环境调整。</p>
+        <div className="settings-grid">
+          <label>
+            Provider
+            <select value={form.provider} onChange={(event) => setProvider(event.target.value as Provider)}>
+              <option value="openai">OpenAI</option>
+              <option value="nvidia">NVIDIA</option>
+              <option value="openrouter">OpenRouter</option>
+            </select>
+          </label>
+          <label>
+            Model
+            <input value={form.model} onChange={(event) => setForm({ ...form, model: event.target.value })} />
+          </label>
+          <label className="full">
+            Base URL
+            <input value={form.base_url} onChange={(event) => setForm({ ...form, base_url: event.target.value })} />
+          </label>
+        </div>
+      </fieldset>
+
+      <fieldset className="settings-section">
+        <legend>认证与扩展</legend>
+        <p>API Key 仅在填写新值时更新；保留为空可继续使用当前已保存的密钥。</p>
+        <div className="settings-grid">
+          <label className="full">
+            API Key
+            <input
+              type="password"
+              placeholder={props.setting?.api_key ? `当前：${props.setting.api_key}` : ""}
+              value={form.api_key ?? ""}
+              onChange={(event) => setForm({ ...form, api_key: event.target.value })}
+            />
+          </label>
+          <label className="full">
+            Extra Headers JSON
+            <textarea
+              aria-describedby={headersError ? "headers-error" : undefined}
+              aria-invalid={Boolean(headersError)}
+              value={headersText}
+              onChange={(event) => {
+                setHeadersText(event.target.value);
+                setHeadersError("");
+              }}
+            />
+          </label>
+          {headersError && <p className="field-error full" id="headers-error" role="alert">{headersError}</p>}
+        </div>
+      </fieldset>
+
+      <div className="button-row settings-actions">
+        <button className="primary" type="submit">
+          <Save size={18} />
+          保存设置
+        </button>
+      </div>
+    </form>
   );
 }
 
