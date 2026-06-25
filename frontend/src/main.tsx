@@ -8,11 +8,13 @@ import {
   Download,
   FileText,
   LoaderCircle,
+  Mail,
   NotebookTabs,
   Pencil,
   Plus,
   RefreshCw,
   Save,
+  Send,
   Settings,
   Sparkles,
   Trash2,
@@ -20,7 +22,18 @@ import {
 } from "lucide-react";
 
 import { api, docxUrl } from "./api";
-import type { LlmSetting, Priority, Provider, Report, ReportType, Template, WorkLog } from "./types";
+import type {
+  EmailSetting,
+  LlmSetting,
+  Priority,
+  Provider,
+  Recipient,
+  Report,
+  ReportEmailDelivery,
+  ReportType,
+  Template,
+  WorkLog
+} from "./types";
 import "./styles.css";
 
 type Tab = "logs" | "reports" | "templates" | "settings";
@@ -55,6 +68,8 @@ function App() {
   const [reports, setReports] = React.useState<Report[]>([]);
   const [templates, setTemplates] = React.useState<Template[]>([]);
   const [llmSetting, setLlmSetting] = React.useState<LlmSetting | null>(null);
+  const [emailSetting, setEmailSetting] = React.useState<EmailSetting | null>(null);
+  const [recipients, setRecipients] = React.useState<Recipient[]>([]);
   const [notice, setNotice] = React.useState("");
   const [error, setError] = React.useState("");
   const [loading, setLoading] = React.useState(true);
@@ -63,17 +78,21 @@ function App() {
     setLoading(true);
     setError("");
     try {
-      const [logsPage, reportList, templateList, setting] = await Promise.all([
+      const [logsPage, reportList, templateList, setting, savedEmailSetting, recipientList] = await Promise.all([
         api.listWorkLogs(pageOverride, pageSizeOverride),
         api.listReports(),
         api.listTemplates(),
-        api.getLlmSetting()
+        api.getLlmSetting(),
+        api.getEmailSetting(),
+        api.listRecipients()
       ]);
       setWorkLogs(logsPage.items);
       setWorkLogMeta(logsPage);
       setReports(reportList);
       setTemplates(templateList);
       setLlmSetting(setting);
+      setEmailSetting(savedEmailSetting);
+      setRecipients(recipientList);
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载失败");
     } finally {
@@ -122,7 +141,7 @@ function App() {
             模板管理
           </TabButton>
           <TabButton active={tab === "settings"} icon={<Settings size={18} />} onClick={() => setTab("settings")}>
-            LLM 设置
+            系统设置
           </TabButton>
         </nav>
       </aside>
@@ -163,9 +182,12 @@ function App() {
           <ReportsPage
             reports={reports}
             templates={templates}
+            recipients={recipients}
             onGenerate={(payload) => run(() => api.generateReport(payload).then(() => undefined), "报告草稿已生成")}
             onSave={(id, payload) => run(() => api.updateReport(id, payload).then(() => undefined), "报告草稿已保存到本地数据库")}
             onDelete={(id) => run(() => api.deleteReport(id), "报告草稿已删除")}
+            onSendEmail={(id, payload) => run(() => api.sendReportEmail(id, payload).then(() => undefined), "报告邮件已发送")}
+            onListEmailDeliveries={(id) => api.listReportEmailDeliveries(id)}
           />
         )}
         {tab === "templates" && (
@@ -191,7 +213,14 @@ function App() {
         {tab === "settings" && (
           <SettingsPage
             setting={llmSetting}
+            emailSetting={emailSetting}
+            recipients={recipients}
             onSave={(payload) => run(() => api.updateLlmSetting(payload).then(() => undefined), "LLM 设置已保存")}
+            onSaveEmail={(payload) => run(() => api.updateEmailSetting(payload).then(() => undefined), "SMTP 邮箱设置已保存")}
+            onTestEmail={(address) => run(() => api.testEmailSetting(address).then(() => undefined), "测试邮件已发送")}
+            onCreateRecipient={(payload) => run(() => api.createRecipient(payload).then(() => undefined), "收件人已添加")}
+            onUpdateRecipient={(id, payload) => run(() => api.updateRecipient(id, payload).then(() => undefined), "收件人已更新")}
+            onDeleteRecipient={(id) => run(() => api.deleteRecipient(id), "收件人已删除")}
           />
         )}
       </section>
@@ -204,7 +233,7 @@ function tabTitle(tab: Tab) {
     logs: "每日记录",
     reports: "报告草稿",
     templates: "模板管理",
-    settings: "LLM 设置"
+    settings: "系统设置"
   }[tab];
 }
 
@@ -471,6 +500,7 @@ function dateRangeLabel(item: WorkLog) {
 function ReportsPage(props: {
   reports: Report[];
   templates: Template[];
+  recipients: Recipient[];
   onGenerate: (payload: {
     report_type: ReportType;
     anchor_date?: string;
@@ -479,6 +509,8 @@ function ReportsPage(props: {
   }) => Promise<void>;
   onSave: (id: number, payload: Partial<Report>) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
+  onSendEmail: (id: number, payload: { recipient_ids: number[]; additional_recipients: string[]; subject: string }) => Promise<void>;
+  onListEmailDeliveries: (id: number) => Promise<ReportEmailDelivery[]>;
 }) {
   const [type, setType] = React.useState<ReportType>("weekly_report");
   const [anchor, setAnchor] = React.useState(today());
@@ -489,6 +521,13 @@ function ReportsPage(props: {
   const [draftTitle, setDraftTitle] = React.useState("");
   const [viewMode, setViewMode] = React.useState<"edit" | "preview">("edit");
   const [isGenerating, setIsGenerating] = React.useState(false);
+  const [showEmailDialog, setShowEmailDialog] = React.useState(false);
+  const [emailSubject, setEmailSubject] = React.useState("");
+  const [selectedRecipientIds, setSelectedRecipientIds] = React.useState<number[]>([]);
+  const [additionalRecipients, setAdditionalRecipients] = React.useState("");
+  const [emailDeliveries, setEmailDeliveries] = React.useState<ReportEmailDelivery[]>([]);
+  const [isSendingEmail, setIsSendingEmail] = React.useState(false);
+  const [emailError, setEmailError] = React.useState("");
   const generationLock = React.useRef(false);
 
   React.useEffect(() => {
@@ -525,6 +564,67 @@ function ReportsPage(props: {
     }
     await props.onDelete(selected.id);
     setSelectedId(null);
+  }
+
+  async function openEmailDialog() {
+    if (!selected) {
+      return;
+    }
+    setEmailSubject(draftTitle || selected.title);
+    setSelectedRecipientIds(props.recipients.filter((recipient) => recipient.is_default).map((recipient) => recipient.id));
+    setAdditionalRecipients("");
+    setEmailError("");
+    setShowEmailDialog(true);
+    try {
+      setEmailDeliveries(await props.onListEmailDeliveries(selected.id));
+    } catch (error) {
+      setEmailError(error instanceof Error ? error.message : "发送记录加载失败");
+    }
+  }
+
+  function toggleRecipient(recipientId: number) {
+    setSelectedRecipientIds((current) =>
+      current.includes(recipientId) ? current.filter((id) => id !== recipientId) : [...current, recipientId]
+    );
+  }
+
+  async function sendEmail() {
+    if (!selected || isSendingEmail) {
+      return;
+    }
+    const transientRecipients = additionalRecipients
+      .split(/[;,，\n]/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (!emailSubject.trim()) {
+      setEmailError("请填写邮件主题。");
+      return;
+    }
+    if (selectedRecipientIds.length === 0 && transientRecipients.length === 0) {
+      setEmailError("请至少选择一位收件人或填写一个邮箱。");
+      return;
+    }
+    setIsSendingEmail(true);
+    setEmailError("");
+    try {
+      await props.onSave(selected.id, { title: draftTitle, content_markdown: draft });
+      await props.onSendEmail(selected.id, {
+        recipient_ids: selectedRecipientIds,
+        additional_recipients: transientRecipients,
+        subject: emailSubject.trim()
+      });
+      setEmailDeliveries(await props.onListEmailDeliveries(selected.id));
+      setShowEmailDialog(false);
+    } catch (error) {
+      setEmailError(error instanceof Error ? error.message : "邮件发送失败");
+      try {
+        setEmailDeliveries(await props.onListEmailDeliveries(selected.id));
+      } catch {
+        // Keep the original delivery error visible if the history refresh also fails.
+      }
+    } finally {
+      setIsSendingEmail(false);
+    }
   }
 
   return (
@@ -642,6 +742,15 @@ function ReportsPage(props: {
               <button
                 className="icon-button"
                 type="button"
+                title="发送邮件"
+                aria-label="发送邮件"
+                onClick={() => void openEmailDialog()}
+              >
+                <Mail size={18} />
+              </button>
+              <button
+                className="icon-button"
+                type="button"
                 title="保存草稿到本地数据库"
                 aria-label="保存草稿"
                 onClick={() => void props.onSave(selected.id, { title: draftTitle, content_markdown: draft })}
@@ -678,6 +787,89 @@ function ReportsPage(props: {
           </section>
         )}
       </div>
+      {showEmailDialog && selected && (
+        <section className="email-dialog-backdrop" role="presentation" onMouseDown={() => !isSendingEmail && setShowEmailDialog(false)}>
+          <div
+            className="email-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="email-dialog-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="dialog-heading">
+              <div>
+                <p className="section-eyebrow">发送报告</p>
+                <h2 id="email-dialog-title">发送给收件人</h2>
+                <p>将保存当前草稿，并发送正文与 DOCX 附件。</p>
+              </div>
+              <button className="icon-button" type="button" aria-label="关闭发送窗口" onClick={() => setShowEmailDialog(false)} disabled={isSendingEmail}>
+                <X size={18} />
+              </button>
+            </div>
+            <label>
+              邮件主题
+              <input value={emailSubject} onChange={(event) => setEmailSubject(event.target.value)} disabled={isSendingEmail} />
+            </label>
+            <div className="recipient-picker">
+              <div className="dialog-field-label">通讯录收件人</div>
+              {props.recipients.length === 0 ? (
+                <p className="form-hint">通讯录暂无收件人，可在系统设置中添加，或直接填写下方临时邮箱。</p>
+              ) : (
+                <div className="recipient-options">
+                  {props.recipients.map((recipient) => (
+                    <label className="recipient-option" key={recipient.id}>
+                      <input
+                        type="checkbox"
+                        checked={selectedRecipientIds.includes(recipient.id)}
+                        disabled={isSendingEmail}
+                        onChange={() => toggleRecipient(recipient.id)}
+                      />
+                      <span>
+                        <strong>{recipient.name}</strong>
+                        <small>{recipient.email}</small>
+                      </span>
+                      {recipient.is_default && <em>默认</em>}
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+            <label>
+              临时邮箱
+              <textarea
+                className="recipient-input"
+                placeholder="多个邮箱可使用逗号、分号或换行分隔；不会自动保存到通讯录"
+                value={additionalRecipients}
+                disabled={isSendingEmail}
+                onChange={(event) => setAdditionalRecipients(event.target.value)}
+              />
+            </label>
+            {emailError && <p className="field-error" role="alert">{emailError}</p>}
+            <div className="delivery-history">
+              <div className="dialog-field-label">最近发送记录</div>
+              {emailDeliveries.length === 0 ? (
+                <p className="form-hint">这份报告尚未发送过。</p>
+              ) : (
+                emailDeliveries.slice(0, 5).map((delivery) => (
+                  <div className={`delivery-item ${delivery.status}`} key={delivery.id}>
+                    <span>{delivery.status === "sent" ? "已发送" : delivery.status === "failed" ? "发送失败" : "发送中"}</span>
+                    <p>{delivery.recipients.map((recipient) => recipient.email).join("、")}</p>
+                    <small>{new Date(delivery.sent_at ?? delivery.created_at).toLocaleString("zh-CN")}</small>
+                    {delivery.error_message && <small className="delivery-error">{delivery.error_message}</small>}
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="button-row dialog-actions">
+              <button className="secondary" type="button" disabled={isSendingEmail} onClick={() => setShowEmailDialog(false)}>取消</button>
+              <button className="primary" type="button" disabled={isSendingEmail} onClick={() => void sendEmail()}>
+                <Send size={17} />
+                {isSendingEmail ? "发送中" : "保存并发送"}
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
     </div>
   );
 }
@@ -1074,7 +1266,17 @@ function TemplatesPage(props: {
   );
 }
 
-function SettingsPage(props: { setting: LlmSetting | null; onSave: (payload: LlmSetting) => Promise<void> }) {
+function SettingsPage(props: {
+  setting: LlmSetting | null;
+  emailSetting: EmailSetting | null;
+  recipients: Recipient[];
+  onSave: (payload: LlmSetting) => Promise<void>;
+  onSaveEmail: (payload: EmailSetting) => Promise<void>;
+  onTestEmail: (address: string) => Promise<void>;
+  onCreateRecipient: (payload: Pick<Recipient, "name" | "email" | "is_default">) => Promise<void>;
+  onUpdateRecipient: (id: number, payload: Partial<Pick<Recipient, "name" | "email" | "is_default">>) => Promise<void>;
+  onDeleteRecipient: (id: number) => Promise<void>;
+}) {
   const [form, setForm] = React.useState<LlmSetting>({
     provider: "openai",
     base_url: providerDefaults.openai.base_url,
@@ -1121,7 +1323,8 @@ function SettingsPage(props: { setting: LlmSetting | null; onSave: (payload: Llm
   }
 
   return (
-    <form className="panel settings-panel" onSubmit={(event) => void save(event)}>
+    <div className="settings-stack">
+      <form className="panel settings-panel" onSubmit={(event) => void save(event)}>
       <div className="settings-intro">
         <p className="section-eyebrow">本地配置</p>
         <h2>LLM 设置</h2>
@@ -1191,7 +1394,193 @@ function SettingsPage(props: { setting: LlmSetting | null; onSave: (payload: Llm
           保存设置
         </button>
       </div>
+      </form>
+      <EmailSettingsPanel setting={props.emailSetting} onSave={props.onSaveEmail} onTest={props.onTestEmail} />
+      <RecipientDirectory
+        recipients={props.recipients}
+        onCreate={props.onCreateRecipient}
+        onUpdate={props.onUpdateRecipient}
+        onDelete={props.onDeleteRecipient}
+      />
+    </div>
+  );
+}
+
+function EmailSettingsPanel(props: {
+  setting: EmailSetting | null;
+  onSave: (payload: EmailSetting) => Promise<void>;
+  onTest: (address: string) => Promise<void>;
+}) {
+  const [form, setForm] = React.useState<EmailSetting>({
+    host: "",
+    port: 587,
+    security: "starttls",
+    username: "",
+    password: "",
+    sender_address: "",
+    sender_name: ""
+  });
+  const [testAddress, setTestAddress] = React.useState("");
+
+  React.useEffect(() => {
+    if (props.setting) {
+      setForm({ ...props.setting, password: "" });
+      setTestAddress(props.setting.sender_address);
+    }
+  }, [props.setting?.host, props.setting?.port, props.setting?.username, props.setting?.sender_address]);
+
+  async function save(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await props.onSave({ ...form, sender_name: form.sender_name?.trim() || null });
+  }
+
+  return (
+    <form className="panel settings-panel" onSubmit={(event) => void save(event)}>
+      <div className="settings-intro">
+        <p className="section-eyebrow">邮件投递</p>
+        <h2>SMTP 邮箱设置</h2>
+        <p>使用你的企业邮箱或个人邮箱 SMTP 服务发送报告。密码只保存在本地后端，读取时会脱敏。</p>
+        <div className="settings-side-note">
+          <span>密码提示</span>
+          <strong>留空即可保留当前密码</strong>
+          <p>多数邮箱需要填写“应用专用密码”，而不是网页登录密码。</p>
+        </div>
+      </div>
+      <fieldset className="settings-section">
+        <legend>服务器与发件人</legend>
+        <div className="settings-grid">
+          <label>
+            SMTP 主机
+            <input required value={form.host} placeholder="smtp.example.com" onChange={(event) => setForm({ ...form, host: event.target.value })} />
+          </label>
+          <label>
+            端口
+            <input required type="number" min="1" max="65535" value={form.port} onChange={(event) => setForm({ ...form, port: Number(event.target.value) })} />
+          </label>
+          <label>
+            加密方式
+            <select value={form.security} onChange={(event) => setForm({ ...form, security: event.target.value as EmailSetting["security"] })}>
+              <option value="starttls">STARTTLS（通常为 587）</option>
+              <option value="ssl">SSL/TLS（通常为 465）</option>
+            </select>
+          </label>
+          <label>
+            SMTP 用户名
+            <input required value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} />
+          </label>
+          <label className="full">
+            SMTP 密码 / 应用专用密码
+            <input
+              type="password"
+              placeholder={props.setting?.password ? `当前：${props.setting.password}` : "首次保存时必填"}
+              value={form.password ?? ""}
+              onChange={(event) => setForm({ ...form, password: event.target.value })}
+            />
+          </label>
+          <label>
+            发件人邮箱
+            <input required type="email" value={form.sender_address} onChange={(event) => setForm({ ...form, sender_address: event.target.value })} />
+          </label>
+          <label>
+            发件人名称（可选）
+            <input value={form.sender_name ?? ""} onChange={(event) => setForm({ ...form, sender_name: event.target.value })} />
+          </label>
+        </div>
+      </fieldset>
+      <div className="button-row settings-actions">
+        <button className="primary" type="submit"><Save size={18} />保存 SMTP 设置</button>
+      </div>
+      <fieldset className="settings-section smtp-test-section">
+        <legend>发送测试邮件</legend>
+        <p>保存 SMTP 设置后，发送一封测试邮件以确认网络与鉴权正常。</p>
+        <div className="test-email-row">
+          <input type="email" value={testAddress} placeholder="your-email@example.com" onChange={(event) => setTestAddress(event.target.value)} />
+          <button className="secondary" type="button" disabled={!testAddress.trim()} onClick={() => void props.onTest(testAddress.trim())}>
+            <Mail size={17} />发送测试
+          </button>
+        </div>
+      </fieldset>
     </form>
+  );
+}
+
+function RecipientDirectory(props: {
+  recipients: Recipient[];
+  onCreate: (payload: Pick<Recipient, "name" | "email" | "is_default">) => Promise<void>;
+  onUpdate: (id: number, payload: Partial<Pick<Recipient, "name" | "email" | "is_default">>) => Promise<void>;
+  onDelete: (id: number) => Promise<void>;
+}) {
+  const emptyForm = { name: "", email: "", is_default: false };
+  const [form, setForm] = React.useState(emptyForm);
+  const [editingId, setEditingId] = React.useState<number | null>(null);
+
+  function startEdit(recipient: Recipient) {
+    setEditingId(recipient.id);
+    setForm({ name: recipient.name, email: recipient.email, is_default: recipient.is_default });
+  }
+
+  function reset() {
+    setEditingId(null);
+    setForm(emptyForm);
+  }
+
+  async function save(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (editingId) {
+      await props.onUpdate(editingId, form);
+    } else {
+      await props.onCreate(form);
+    }
+    reset();
+  }
+
+  async function remove(recipient: Recipient) {
+    if (!window.confirm(`删除收件人「${recipient.name}」？`)) {
+      return;
+    }
+    await props.onDelete(recipient.id);
+    if (editingId === recipient.id) {
+      reset();
+    }
+  }
+
+  return (
+    <section className="panel recipient-directory">
+      <div className="panel-heading">
+        <div>
+          <p className="section-eyebrow">报告对象</p>
+          <h2>收件人通讯录</h2>
+          <p>默认收件人会在发送报告时自动勾选；可设置多个。</p>
+        </div>
+        <span className="count-badge">{props.recipients.length} 位</span>
+      </div>
+      <div className="recipient-directory-body">
+        <div className="recipient-list">
+          {props.recipients.length === 0 ? (
+            <p className="form-hint">还没有收件人。添加上级邮箱后，发送报告时可一键选中。</p>
+          ) : props.recipients.map((recipient) => (
+            <div className={editingId === recipient.id ? "recipient-row active" : "recipient-row"} key={recipient.id}>
+              <button type="button" onClick={() => startEdit(recipient)}>
+                <strong>{recipient.name}</strong>
+                <span>{recipient.email}</span>
+              </button>
+              {recipient.is_default && <em>默认</em>}
+              <button className="icon-button danger" type="button" title="删除收件人" aria-label={`删除 ${recipient.name}`} onClick={() => void remove(recipient)}><Trash2 size={16} /></button>
+            </div>
+          ))}
+        </div>
+        <form className="recipient-form" onSubmit={(event) => void save(event)}>
+          <h3>{editingId ? "编辑收件人" : "添加收件人"}</h3>
+          <label>姓名<input required value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></label>
+          <label>邮箱<input required type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} /></label>
+          <label className="toggle"><input type="checkbox" checked={form.is_default} onChange={(event) => setForm({ ...form, is_default: event.target.checked })} />默认收件人</label>
+          <div className="button-row">
+            <button className="primary" type="submit"><Plus size={17} />{editingId ? "保存修改" : "添加收件人"}</button>
+            {editingId && <button className="secondary" type="button" onClick={reset}>取消</button>}
+          </div>
+        </form>
+      </div>
+    </section>
   );
 }
 

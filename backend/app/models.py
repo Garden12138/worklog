@@ -58,6 +58,29 @@ class LLMSetting(TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class EmailSetting(TimestampMixin, Base):
+    __tablename__ = "email_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    host: Mapped[str] = mapped_column(String(255))
+    port: Mapped[int] = mapped_column(Integer)
+    security: Mapped[str] = mapped_column(String(32), default="starttls")
+    username: Mapped[str] = mapped_column(String(320))
+    password: Mapped[str] = mapped_column(Text)
+    sender_address: Mapped[str] = mapped_column(String(320))
+    sender_name: Mapped[str | None] = mapped_column(String(160), default=None)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class Recipient(TimestampMixin, Base):
+    __tablename__ = "recipients"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(160))
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class Report(TimestampMixin, Base):
     __tablename__ = "reports"
     __table_args__ = (
@@ -79,6 +102,21 @@ class Report(TimestampMixin, Base):
     edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
 
     template: Mapped[Template | None] = relationship("Template", back_populates="reports")
+
+
+class ReportEmailDelivery(TimestampMixin, Base):
+    __tablename__ = "report_email_deliveries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    report_id: Mapped[int] = mapped_column(ForeignKey("reports.id", ondelete="CASCADE"), index=True)
+    subject: Mapped[str] = mapped_column(String(240))
+    recipients_json: Mapped[str] = mapped_column(Text)
+    content_markdown: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    error_message: Mapped[str | None] = mapped_column(Text, default=None)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+
+    report: Mapped["Report"] = relationship("Report")
 
 
 class GenerationTask(TimestampMixin, Base):

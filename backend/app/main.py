@@ -9,16 +9,35 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.constants import ReportType
+from app.constants import EmailDeliveryStatus, ReportType
 from app.database import SessionLocal, get_db, init_db
-from app.models import GenerationTask, LLMSetting, Report, Template, WorkLog, utcnow
+from app.models import (
+    EmailSetting,
+    GenerationTask,
+    LLMSetting,
+    Recipient,
+    Report,
+    ReportEmailDelivery,
+    Template,
+    WorkLog,
+    utcnow,
+)
 from app.scheduler import start_scheduler, stop_scheduler
 from app.schemas import (
     GenerateResponse,
     HealthResponse,
+    EmailSettingRead,
+    EmailSettingUpdate,
+    EmailTestRequest,
+    EmailTestResponse,
     LLMSettingRead,
     LLMSettingUpdate,
     PaginatedWorkLogs,
+    RecipientCreate,
+    RecipientRead,
+    RecipientUpdate,
+    ReportEmailDeliveryRead,
+    ReportEmailSendRequest,
     ReportGenerateRequest,
     ReportRead,
     ReportUpdate,
@@ -32,6 +51,7 @@ from app.schemas import (
     WorkLogUpdate,
 )
 from app.services.docx_export import markdown_to_docx
+from app.services.email import EmailDeliveryError, markdown_to_email_html, send_email
 from app.services.llm import LLMClient
 from app.services.reports import create_report, report_to_dict_source_ids, seed_default_templates
 from app.services.reports import active_llm_setting
@@ -66,6 +86,40 @@ def report_read(report: Report) -> ReportRead:
             "source_log_ids": report_to_dict_source_ids(report),
         }
     )
+
+
+def email_setting_read(setting: EmailSetting) -> EmailSettingRead:
+    return EmailSettingRead(
+        host=setting.host,
+        port=setting.port,
+        security=setting.security,
+        username=setting.username,
+        password=setting.password,
+        sender_address=setting.sender_address,
+        sender_name=setting.sender_name,
+    )
+
+
+def report_email_delivery_read(delivery: ReportEmailDelivery) -> ReportEmailDeliveryRead:
+    try:
+        recipients = json.loads(delivery.recipients_json)
+    except json.JSONDecodeError:
+        recipients = []
+    return ReportEmailDeliveryRead(
+        id=delivery.id,
+        report_id=delivery.report_id,
+        subject=delivery.subject,
+        recipients=recipients,
+        status=delivery.status,
+        error_message=delivery.error_message,
+        sent_at=delivery.sent_at,
+        created_at=delivery.created_at,
+        updated_at=delivery.updated_at,
+    )
+
+
+def active_email_setting(db: Session) -> EmailSetting | None:
+    return db.scalar(select(EmailSetting).where(EmailSetting.is_active.is_(True)).order_by(EmailSetting.id.desc()))
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -273,6 +327,9 @@ def delete_report(report_id: int, db: Session = Depends(get_db)) -> None:
         {"report_id": None},
         synchronize_session=False,
     )
+    db.query(ReportEmailDelivery).filter(ReportEmailDelivery.report_id == report_id).delete(
+        synchronize_session=False,
+    )
     result = db.execute(delete(Report).where(Report.id == report_id))
     db.commit()
     if result.rowcount == 0:
@@ -308,6 +365,92 @@ def export_report_docx(report_id: int, db: Session = Depends(get_db)) -> Streami
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@app.get("/api/reports/{report_id}/email-deliveries", response_model=list[ReportEmailDeliveryRead])
+def list_report_email_deliveries(
+    report_id: int,
+    db: Session = Depends(get_db),
+) -> list[ReportEmailDeliveryRead]:
+    if not db.get(Report, report_id):
+        raise HTTPException(status_code=404, detail="Report not found")
+    deliveries = db.scalars(
+        select(ReportEmailDelivery)
+        .where(ReportEmailDelivery.report_id == report_id)
+        .order_by(ReportEmailDelivery.created_at.desc(), ReportEmailDelivery.id.desc())
+    )
+    return [report_email_delivery_read(item) for item in deliveries]
+
+
+@app.post("/api/reports/{report_id}/send-email", response_model=ReportEmailDeliveryRead)
+def send_report_email(
+    report_id: int,
+    payload: ReportEmailSendRequest,
+    db: Session = Depends(get_db),
+) -> ReportEmailDeliveryRead:
+    report = db.get(Report, report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    setting = active_email_setting(db)
+    if not setting:
+        raise HTTPException(status_code=400, detail="请先在设置中完成 SMTP 邮箱配置")
+
+    selected_ids = list(dict.fromkeys(payload.recipient_ids))
+    contacts = list(db.scalars(select(Recipient).where(Recipient.id.in_(selected_ids)))) if selected_ids else []
+    found_ids = {contact.id for contact in contacts}
+    if found_ids != set(selected_ids):
+        raise HTTPException(status_code=422, detail="存在已删除或无效的收件人")
+
+    snapshots: list[dict[str, str | None]] = []
+    recipient_addresses: list[str] = []
+    seen_addresses: set[str] = set()
+    for contact in contacts:
+        if contact.email not in seen_addresses:
+            snapshots.append({"name": contact.name, "email": contact.email})
+            recipient_addresses.append(contact.email)
+            seen_addresses.add(contact.email)
+    for address in payload.additional_recipients:
+        if address not in seen_addresses:
+            snapshots.append({"name": None, "email": address})
+            recipient_addresses.append(address)
+            seen_addresses.add(address)
+    if not recipient_addresses:
+        raise HTTPException(status_code=422, detail="至少需要一位有效收件人")
+
+    delivery = ReportEmailDelivery(
+        report_id=report.id,
+        subject=payload.subject,
+        recipients_json=json.dumps(snapshots, ensure_ascii=False),
+        content_markdown=report.content_markdown,
+        status=EmailDeliveryStatus.PENDING.value,
+    )
+    db.add(delivery)
+    db.commit()
+    db.refresh(delivery)
+
+    filename = f"worklog-{report.report_type}-{report.period_start}-{report.period_end}.docx"
+    try:
+        send_email(
+            setting,
+            recipient_addresses,
+            payload.subject,
+            report.content_markdown,
+            markdown_to_email_html(report.content_markdown),
+            filename,
+            markdown_to_docx(report.content_markdown).getvalue(),
+        )
+    except EmailDeliveryError as exc:
+        delivery.status = EmailDeliveryStatus.FAILED.value
+        delivery.error_message = str(exc)
+        db.commit()
+        db.refresh(delivery)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    delivery.status = EmailDeliveryStatus.SENT.value
+    delivery.sent_at = utcnow()
+    db.commit()
+    db.refresh(delivery)
+    return report_email_delivery_read(delivery)
 
 
 @app.get("/api/settings/llm", response_model=LLMSettingRead | None)
@@ -350,3 +493,98 @@ def update_llm_setting(payload: LLMSettingUpdate, db: Session = Depends(get_db))
         api_key=item.api_key,
         extra_headers=json.loads(item.extra_headers or "{}"),
     )
+
+
+@app.get("/api/settings/email", response_model=EmailSettingRead | None)
+def get_email_setting(db: Session = Depends(get_db)) -> EmailSettingRead | None:
+    item = active_email_setting(db)
+    return email_setting_read(item) if item else None
+
+
+@app.put("/api/settings/email", response_model=EmailSettingRead)
+def update_email_setting(payload: EmailSettingUpdate, db: Session = Depends(get_db)) -> EmailSettingRead:
+    previous = active_email_setting(db)
+    password = payload.password or (previous.password if previous else None)
+    if not password:
+        raise HTTPException(status_code=422, detail="SMTP 密码不能为空")
+    db.query(EmailSetting).update({"is_active": False})
+    item = EmailSetting(
+        host=payload.host,
+        port=payload.port,
+        security=payload.security.value,
+        username=payload.username,
+        password=password,
+        sender_address=payload.sender_address,
+        sender_name=payload.sender_name or None,
+        is_active=True,
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return email_setting_read(item)
+
+
+@app.post("/api/settings/email/test", response_model=EmailTestResponse)
+def send_email_test(payload: EmailTestRequest, db: Session = Depends(get_db)) -> EmailTestResponse:
+    setting = active_email_setting(db)
+    if not setting:
+        raise HTTPException(status_code=400, detail="请先保存 SMTP 邮箱配置")
+    try:
+        send_email(
+            setting,
+            [payload.recipient_email],
+            "Worklog SMTP 测试邮件",
+            "这是一封来自 Worklog 的 SMTP 测试邮件。",
+            "<p>这是一封来自 <strong>Worklog</strong> 的 SMTP 测试邮件。</p>",
+        )
+    except EmailDeliveryError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return EmailTestResponse()
+
+
+@app.get("/api/recipients", response_model=list[RecipientRead])
+def list_recipients(db: Session = Depends(get_db)) -> list[Recipient]:
+    return list(db.scalars(select(Recipient).order_by(Recipient.is_default.desc(), Recipient.name.asc(), Recipient.id.asc())))
+
+
+@app.post("/api/recipients", response_model=RecipientRead, status_code=201)
+def create_recipient(payload: RecipientCreate, db: Session = Depends(get_db)) -> Recipient:
+    existing = db.scalar(select(Recipient).where(Recipient.email == payload.email))
+    if existing:
+        raise HTTPException(status_code=409, detail="该邮箱已在通讯录中")
+    item = Recipient(**payload.model_dump())
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@app.put("/api/recipients/{recipient_id}", response_model=RecipientRead)
+def update_recipient(
+    recipient_id: int,
+    payload: RecipientUpdate,
+    db: Session = Depends(get_db),
+) -> Recipient:
+    item = db.get(Recipient, recipient_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Recipient not found")
+    update_data = payload.model_dump(exclude_unset=True)
+    email = update_data.get("email")
+    if email and email != item.email:
+        existing = db.scalar(select(Recipient).where(Recipient.email == email))
+        if existing:
+            raise HTTPException(status_code=409, detail="该邮箱已在通讯录中")
+    for key, value in update_data.items():
+        setattr(item, key, value)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@app.delete("/api/recipients/{recipient_id}", status_code=204)
+def delete_recipient(recipient_id: int, db: Session = Depends(get_db)) -> None:
+    item = db.get(Recipient, recipient_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Recipient not found")
+    db.delete(item)
+    db.commit()

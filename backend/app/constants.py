@@ -18,6 +18,17 @@ class ReportStatus(str, Enum):
     DRAFT = "draft"
 
 
+class EmailSecurity(str, Enum):
+    STARTTLS = "starttls"
+    SSL = "ssl"
+
+
+class EmailDeliveryStatus(str, Enum):
+    PENDING = "pending"
+    SENT = "sent"
+    FAILED = "failed"
+
+
 class LLMProvider(str, Enum):
     OPENAI = "openai"
     NVIDIA = "nvidia"

@@ -1,6 +1,8 @@
 export type ReportType = "weekly_report" | "monthly_report" | "performance_review";
 export type Priority = "low" | "medium" | "high" | "urgent";
 export type Provider = "openai" | "nvidia" | "openrouter";
+export type EmailSecurity = "starttls" | "ssl";
+export type EmailDeliveryStatus = "pending" | "sent" | "failed";
 
 export interface WorkLog {
   id: number;
@@ -65,6 +67,42 @@ export interface LlmSetting {
   model: string;
   api_key?: string | null;
   extra_headers: Record<string, string>;
+}
+
+export interface EmailSetting {
+  host: string;
+  port: number;
+  security: EmailSecurity;
+  username: string;
+  password?: string | null;
+  sender_address: string;
+  sender_name?: string | null;
+}
+
+export interface Recipient {
+  id: number;
+  name: string;
+  email: string;
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DeliveryRecipient {
+  name?: string | null;
+  email: string;
+}
+
+export interface ReportEmailDelivery {
+  id: number;
+  report_id: number;
+  subject: string;
+  recipients: DeliveryRecipient[];
+  status: EmailDeliveryStatus;
+  error_message?: string | null;
+  sent_at?: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface GenerateResponse {

@@ -1,8 +1,11 @@
 import type {
+  EmailSetting,
   GenerateResponse,
   LlmSetting,
   PaginatedWorkLogs,
+  Recipient,
   Report,
+  ReportEmailDelivery,
   ReportType,
   Template,
   TemplateImportExampleResponse,
@@ -72,10 +75,35 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload)
     }),
+  listReportEmailDeliveries: (id: number) =>
+    request<ReportEmailDelivery[]>(`/api/reports/${id}/email-deliveries`),
+  sendReportEmail: (id: number, payload: {
+    recipient_ids: number[];
+    additional_recipients: string[];
+    subject: string;
+  }) => request<ReportEmailDelivery>(`/api/reports/${id}/send-email`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  }),
 
   getLlmSetting: () => request<LlmSetting | null>("/api/settings/llm"),
   updateLlmSetting: (payload: LlmSetting) =>
-    request<LlmSetting>("/api/settings/llm", { method: "PUT", body: JSON.stringify(payload) })
+    request<LlmSetting>("/api/settings/llm", { method: "PUT", body: JSON.stringify(payload) }),
+  getEmailSetting: () => request<EmailSetting | null>("/api/settings/email"),
+  updateEmailSetting: (payload: EmailSetting) =>
+    request<EmailSetting>("/api/settings/email", { method: "PUT", body: JSON.stringify(payload) }),
+  testEmailSetting: (recipient_email: string) =>
+    request<{ sent: boolean }>("/api/settings/email/test", {
+      method: "POST",
+      body: JSON.stringify({ recipient_email })
+    }),
+
+  listRecipients: () => request<Recipient[]>("/api/recipients"),
+  createRecipient: (payload: Pick<Recipient, "name" | "email" | "is_default">) =>
+    request<Recipient>("/api/recipients", { method: "POST", body: JSON.stringify(payload) }),
+  updateRecipient: (id: number, payload: Partial<Pick<Recipient, "name" | "email" | "is_default">>) =>
+    request<Recipient>(`/api/recipients/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+  deleteRecipient: (id: number) => request<void>(`/api/recipients/${id}`, { method: "DELETE" })
 };
 
 export function docxUrl(reportId: number): string {

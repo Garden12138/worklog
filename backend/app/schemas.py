@@ -3,7 +3,22 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.constants import LLMProvider, PROVIDER_DEFAULT_BASE_URLS, ReportType
+from app.constants import EmailDeliveryStatus, EmailSecurity, LLMProvider, PROVIDER_DEFAULT_BASE_URLS, ReportType
+
+
+def normalize_email_address(value: str) -> str:
+    normalized = value.strip().lower()
+    local, separator, domain = normalized.partition("@")
+    if (
+        not separator
+        or not local
+        or not domain
+        or "@" in domain
+        or any(character.isspace() for character in normalized)
+        or "." not in domain
+    ):
+        raise ValueError("a valid email address is required")
+    return normalized
 
 
 class WorkLogBase(BaseModel):
@@ -141,6 +156,170 @@ class LLMSettingRead(BaseModel):
         if len(value) <= 8:
             return "********"
         return f"{value[:4]}...{value[-4:]}"
+
+
+class EmailSettingBase(BaseModel):
+    host: str = Field(min_length=1, max_length=255)
+    port: int = Field(default=587, ge=1, le=65535)
+    security: EmailSecurity = EmailSecurity.STARTTLS
+    username: str = Field(min_length=1, max_length=320)
+    password: str | None = Field(default=None, max_length=1024)
+    sender_address: str = Field(min_length=3, max_length=320)
+    sender_name: str | None = Field(default=None, max_length=160)
+
+    @field_validator("sender_address")
+    @classmethod
+    def validate_sender_address(cls, value: str) -> str:
+        return normalize_email_address(value)
+
+    @field_validator("host", "username", "sender_name")
+    @classmethod
+    def trim_email_setting_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        trimmed = value.strip()
+        if not trimmed and value is not None:
+            raise ValueError("a value is required")
+        return trimmed
+
+    @field_validator("password")
+    @classmethod
+    def empty_password_to_none(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        return value
+
+
+class EmailSettingUpdate(EmailSettingBase):
+    pass
+
+
+class EmailSettingRead(BaseModel):
+    host: str
+    port: int
+    security: EmailSecurity
+    username: str
+    password: str | None
+    sender_address: str
+    sender_name: str | None
+
+    @field_validator("password")
+    @classmethod
+    def mask_password(cls, value: str | None) -> str | None:
+        if not value:
+            return None
+        if len(value) <= 8:
+            return "********"
+        return f"{value[:4]}...{value[-4:]}"
+
+
+class EmailTestRequest(BaseModel):
+    recipient_email: str = Field(min_length=3, max_length=320)
+
+    @field_validator("recipient_email")
+    @classmethod
+    def validate_recipient_email(cls, value: str) -> str:
+        return normalize_email_address(value)
+
+
+class EmailTestResponse(BaseModel):
+    sent: bool = True
+
+
+class RecipientBase(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    email: str = Field(min_length=3, max_length=320)
+    is_default: bool = False
+
+    @field_validator("name")
+    @classmethod
+    def trim_name(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("a name is required")
+        return trimmed
+
+    @field_validator("email")
+    @classmethod
+    def validate_contact_email(cls, value: str) -> str:
+        return normalize_email_address(value)
+
+
+class RecipientCreate(RecipientBase):
+    pass
+
+
+class RecipientUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    email: str | None = Field(default=None, min_length=3, max_length=320)
+    is_default: bool | None = None
+
+    @field_validator("name")
+    @classmethod
+    def trim_updated_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("a name is required")
+        return trimmed
+
+    @field_validator("email")
+    @classmethod
+    def validate_updated_contact_email(cls, value: str | None) -> str | None:
+        return normalize_email_address(value) if value is not None else None
+
+
+class RecipientRead(RecipientBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DeliveryRecipient(BaseModel):
+    name: str | None = None
+    email: str
+
+
+class ReportEmailSendRequest(BaseModel):
+    recipient_ids: list[int] = Field(default_factory=list, max_length=50)
+    additional_recipients: list[str] = Field(default_factory=list, max_length=50)
+    subject: str = Field(min_length=1, max_length=240)
+
+    @field_validator("additional_recipients")
+    @classmethod
+    def validate_additional_recipients(cls, values: list[str]) -> list[str]:
+        return [normalize_email_address(value) for value in values]
+
+    @field_validator("subject")
+    @classmethod
+    def trim_subject(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("a subject is required")
+        return trimmed
+
+    @model_validator(mode="after")
+    def require_recipient(self) -> "ReportEmailSendRequest":
+        if not self.recipient_ids and not self.additional_recipients:
+            raise ValueError("at least one recipient is required")
+        if any(item <= 0 for item in self.recipient_ids):
+            raise ValueError("recipient IDs must be positive")
+        return self
+
+
+class ReportEmailDeliveryRead(BaseModel):
+    id: int
+    report_id: int
+    subject: str
+    recipients: list[DeliveryRecipient]
+    status: EmailDeliveryStatus
+    error_message: str | None
+    sent_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
 
 
 class ReportRead(BaseModel):
