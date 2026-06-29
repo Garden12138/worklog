@@ -3,6 +3,7 @@ export type Priority = "low" | "medium" | "high" | "urgent";
 export type Provider = "openai" | "nvidia" | "openrouter";
 export type EmailSecurity = "starttls" | "ssl";
 export type EmailDeliveryStatus = "pending" | "sent" | "failed";
+export type ScheduleWeekday = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
 
 export interface WorkLog {
   id: number;
@@ -40,6 +41,12 @@ export interface Template {
 }
 
 export interface TemplateImportExampleResponse {
+  template_type: ReportType;
+  content: string;
+  used_llm: boolean;
+}
+
+export interface TemplateOptimizeResponse {
   template_type: ReportType;
   content: string;
   used_llm: boolean;
@@ -89,6 +96,21 @@ export interface Recipient {
   name: string;
   email: string;
   is_default: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReportSchedule {
+  id: number;
+  report_type: ReportType;
+  enabled: boolean;
+  weekday?: ScheduleWeekday | null;
+  day_of_month?: number | null;
+  template_id?: number | null;
+  run_time: string;
+  auto_send: boolean;
+  recipient_ids: number[];
+  next_run_at?: string | null;
   created_at: string;
   updated_at: string;
 }

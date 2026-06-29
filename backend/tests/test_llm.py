@@ -2,6 +2,7 @@ from datetime import date
 
 import pytest
 
+from app.constants import ReportType
 from app.models import LLMSetting, WorkLog
 from app.services.llm import (
     LLMClient,
@@ -87,3 +88,35 @@ def test_fill_template_requests_completed_markdown(monkeypatch):
     assert result.content.startswith("| 指标名称 | 权重 |")
     assert "生成绩效草稿" in captured["messages"][1]["content"]
     assert "【填写核心任务】" in captured["messages"][1]["content"]
+
+
+def test_optimize_template_preserves_template_constraints(monkeypatch):
+    setting = LLMSetting(
+        provider="openai",
+        base_url="https://api.openai.com/v1",
+        model="test-model",
+        api_key="sk-test",
+        timeout_seconds=60,
+    )
+    captured: dict = {}
+
+    def fake_chat(self, current_setting, payload):
+        captured.update(payload)
+        return "```markdown\n# {{ title }}\n\n## 总结\n\n{{ ai_content }}\n```"
+
+    monkeypatch.setattr("app.services.llm.LLMClient._chat_completion", fake_chat)
+
+    result = LLMClient().optimize_template(
+        setting,
+        template_type=ReportType.WEEKLY,
+        template_content="# {{ title }}\n\n{{ ai_content }}",
+        optimization_request="增加总结章节并精简表达",
+    )
+
+    assert result.used_llm is True
+    assert result.content.startswith("# {{ title }}")
+    prompt = captured["messages"][1]["content"]
+    assert "增加总结章节并精简表达" in prompt
+    assert "以用户优化需求为修改目标" in prompt
+    assert "--- REQUEST START ---" in prompt
+    assert "--- TEMPLATE START ---" in prompt

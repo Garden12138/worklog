@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, time
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -106,6 +106,26 @@ class TemplateImportExampleRequest(BaseModel):
 
 
 class TemplateImportExampleResponse(BaseModel):
+    template_type: ReportType
+    content: str
+    used_llm: bool = True
+
+
+class TemplateOptimizeRequest(BaseModel):
+    template_type: ReportType
+    content: str = Field(min_length=1)
+    optimization_request: str = Field(min_length=2, max_length=1000)
+
+    @field_validator("optimization_request")
+    @classmethod
+    def normalize_optimization_request(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 2:
+            raise ValueError("optimization request must contain at least 2 characters")
+        return normalized
+
+
+class TemplateOptimizeResponse(BaseModel):
     template_type: ReportType
     content: str
     used_llm: bool = True
@@ -282,6 +302,31 @@ class RecipientRead(RecipientBase):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ReportScheduleUpdate(BaseModel):
+    enabled: bool
+    weekday: Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"] | None = None
+    day_of_month: int | None = Field(default=None, ge=1, le=28)
+    template_id: int | None = Field(default=None, gt=0)
+    run_time: time
+    auto_send: bool = False
+    recipient_ids: list[int] = Field(default_factory=list, max_length=50)
+
+    @field_validator("recipient_ids")
+    @classmethod
+    def validate_recipient_ids(cls, values: list[int]) -> list[int]:
+        if any(value <= 0 for value in values):
+            raise ValueError("recipient IDs must be positive")
+        return list(dict.fromkeys(values))
+
+
+class ReportScheduleRead(ReportScheduleUpdate):
+    id: int
+    report_type: ReportType
+    next_run_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
 
 
 class DeliveryRecipient(BaseModel):

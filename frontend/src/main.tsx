@@ -30,7 +30,9 @@ import type {
   Recipient,
   Report,
   ReportEmailDelivery,
+  ReportSchedule,
   ReportType,
+  ScheduleWeekday,
   Template,
   WorkLog
 } from "./types";
@@ -77,6 +79,7 @@ function App() {
   const [llmSettings, setLlmSettings] = React.useState<LlmSetting[]>([]);
   const [emailSetting, setEmailSetting] = React.useState<EmailSetting | null>(null);
   const [recipients, setRecipients] = React.useState<Recipient[]>([]);
+  const [reportSchedules, setReportSchedules] = React.useState<ReportSchedule[]>([]);
   const [notice, setNotice] = React.useState("");
   const [error, setError] = React.useState("");
   const [loading, setLoading] = React.useState(true);
@@ -92,7 +95,8 @@ function App() {
         setting,
         savedSettings,
         savedEmailSetting,
-        recipientList
+        recipientList,
+        scheduleList
       ] = await Promise.all([
         api.listWorkLogs(pageOverride, pageSizeOverride),
         api.listReports(),
@@ -100,7 +104,8 @@ function App() {
         api.getLlmSetting(),
         api.listLlmSettings(),
         api.getEmailSetting(),
-        api.listRecipients()
+        api.listRecipients(),
+        api.listReportSchedules()
       ]);
       setWorkLogs(logsPage.items);
       setWorkLogMeta(logsPage);
@@ -110,6 +115,7 @@ function App() {
       setLlmSettings(savedSettings);
       setEmailSetting(savedEmailSetting);
       setRecipients(recipientList);
+      setReportSchedules(scheduleList);
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载失败");
     } finally {
@@ -223,6 +229,17 @@ function App() {
                 throw err;
               }
             }}
+            onOptimize={async (payload) => {
+              setError("");
+              setNotice("");
+              try {
+                const result = await api.optimizeTemplate(payload);
+                return result.content;
+              } catch (err) {
+                setError(err instanceof Error ? err.message : "优化模板失败");
+                throw err;
+              }
+            }}
             onSave={(id, payload) => run(() => api.updateTemplate(id, payload).then(() => undefined), "模板已保存")}
             onDelete={(id) => run(() => api.deleteTemplate(id), "模板已删除")}
           />
@@ -231,8 +248,10 @@ function App() {
           <SettingsPage
             setting={llmSetting}
             settings={llmSettings}
+            templates={templates}
             emailSetting={emailSetting}
             recipients={recipients}
+            reportSchedules={reportSchedules}
             onSave={(payload) => run(
               () => (payload.id
                 ? api.updateLlmSetting(payload.id, payload)
@@ -242,6 +261,10 @@ function App() {
             )}
             onApplyLlmSetting={(id) => run(() => api.applyLlmSetting(id).then(() => undefined), "LLM 配置已应用")}
             onDeleteLlmSetting={(id) => run(() => api.deleteLlmSetting(id), "LLM 配置已删除")}
+            onSaveReportSchedule={(reportType, payload) => run(
+              () => api.updateReportSchedule(reportType, payload).then(() => undefined),
+              `${reportLabels[reportType]}定时设置已保存，当前${payload.enabled ? "已启用" : "已停用"}`
+            )}
             onSaveEmail={(payload) => run(() => api.updateEmailSetting(payload).then(() => undefined), "SMTP 邮箱设置已保存")}
             onTestEmail={(address) => run(() => api.testEmailSetting(address).then(() => undefined), "测试邮件已发送")}
             onCreateRecipient={(payload) => run(() => api.createRecipient(payload).then(() => undefined), "收件人已添加")}
@@ -837,7 +860,12 @@ function ReportsPage(props: {
               <input value={emailSubject} onChange={(event) => setEmailSubject(event.target.value)} disabled={isSendingEmail} />
             </label>
             <div className="recipient-picker">
-              <div className="dialog-field-label">通讯录收件人</div>
+              <div className="dialog-field-label">
+                <span>通讯录收件人</span>
+                <em className={selectedRecipientIds.length ? "selection-count-badge selected" : "selection-count-badge"}>
+                  {selectedRecipientIds.length ? `已选择 ${selectedRecipientIds.length} 位` : "尚未选择"}
+                </em>
+              </div>
               {props.recipients.length === 0 ? (
                 <p className="form-hint">通讯录暂无收件人，可在系统设置中添加，或直接填写下方临时邮箱。</p>
               ) : (
@@ -1118,10 +1146,127 @@ function renderInlineMarkdownTokens(text: string) {
   return parts.length ? parts : text;
 }
 
+type TemplateDiffRow = {
+  kind: "unchanged" | "removed" | "added";
+  oldLineNumber?: number;
+  newLineNumber?: number;
+  oldText?: string;
+  newText?: string;
+};
+
+function buildTemplateDiff(original: string, optimized: string): TemplateDiffRow[] {
+  const oldLines = original.split("\n");
+  const newLines = optimized.split("\n");
+  if (oldLines.length * newLines.length > 250_000) {
+    let prefixLength = 0;
+    while (
+      prefixLength < oldLines.length
+      && prefixLength < newLines.length
+      && oldLines[prefixLength] === newLines[prefixLength]
+    ) {
+      prefixLength += 1;
+    }
+
+    let suffixLength = 0;
+    while (
+      suffixLength < oldLines.length - prefixLength
+      && suffixLength < newLines.length - prefixLength
+      && oldLines[oldLines.length - suffixLength - 1]
+        === newLines[newLines.length - suffixLength - 1]
+    ) {
+      suffixLength += 1;
+    }
+
+    return [
+      ...oldLines.slice(0, prefixLength).map((text, index) => ({
+        kind: "unchanged" as const,
+        oldLineNumber: index + 1,
+        newLineNumber: index + 1,
+        oldText: text,
+        newText: text,
+      })),
+      ...oldLines.slice(prefixLength, oldLines.length - suffixLength).map((text, index) => ({
+        kind: "removed" as const,
+        oldLineNumber: prefixLength + index + 1,
+        oldText: text,
+      })),
+      ...newLines.slice(prefixLength, newLines.length - suffixLength).map((text, index) => ({
+        kind: "added" as const,
+        newLineNumber: prefixLength + index + 1,
+        newText: text,
+      })),
+      ...oldLines.slice(oldLines.length - suffixLength).map((text, index) => ({
+        kind: "unchanged" as const,
+        oldLineNumber: oldLines.length - suffixLength + index + 1,
+        newLineNumber: newLines.length - suffixLength + index + 1,
+        oldText: text,
+        newText: text,
+      })),
+    ];
+  }
+  const commonLines = Array.from(
+    { length: oldLines.length + 1 },
+    () => new Uint32Array(newLines.length + 1)
+  );
+
+  for (let oldIndex = 1; oldIndex <= oldLines.length; oldIndex += 1) {
+    for (let newIndex = 1; newIndex <= newLines.length; newIndex += 1) {
+      commonLines[oldIndex][newIndex] = oldLines[oldIndex - 1] === newLines[newIndex - 1]
+        ? commonLines[oldIndex - 1][newIndex - 1] + 1
+        : Math.max(commonLines[oldIndex - 1][newIndex], commonLines[oldIndex][newIndex - 1]);
+    }
+  }
+
+  const rows: TemplateDiffRow[] = [];
+  let oldIndex = oldLines.length;
+  let newIndex = newLines.length;
+  while (oldIndex > 0 || newIndex > 0) {
+    if (
+      oldIndex > 0
+      && newIndex > 0
+      && oldLines[oldIndex - 1] === newLines[newIndex - 1]
+    ) {
+      rows.push({
+        kind: "unchanged",
+        oldLineNumber: oldIndex,
+        newLineNumber: newIndex,
+        oldText: oldLines[oldIndex - 1],
+        newText: newLines[newIndex - 1],
+      });
+      oldIndex -= 1;
+      newIndex -= 1;
+    } else if (
+      newIndex > 0
+      && (oldIndex === 0 || commonLines[oldIndex][newIndex - 1] >= commonLines[oldIndex - 1][newIndex])
+    ) {
+      rows.push({
+        kind: "added",
+        newLineNumber: newIndex,
+        newText: newLines[newIndex - 1],
+      });
+      newIndex -= 1;
+    } else {
+      rows.push({
+        kind: "removed",
+        oldLineNumber: oldIndex,
+        oldText: oldLines[oldIndex - 1],
+      });
+      oldIndex -= 1;
+    }
+  }
+
+  return rows.reverse();
+}
+
 function TemplatesPage(props: {
   templates: Template[];
   onCreate: (payload: Partial<Template>) => Promise<void>;
   onImportExample: (payload: { template_type: ReportType; example_content: string }) => Promise<string>;
+  onOptimize: (payload: {
+    template_type: ReportType;
+    content: string;
+    optimization_request: string;
+  }) => Promise<string>;
   onSave: (id: number, payload: Partial<Template>) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
 }) {
@@ -1141,7 +1286,20 @@ function TemplatesPage(props: {
   const [exampleContent, setExampleContent] = React.useState("");
   const [isImporting, setIsImporting] = React.useState(false);
   const [hasImportedDraft, setHasImportedDraft] = React.useState(false);
+  const [isOptimizing, setIsOptimizing] = React.useState(false);
+  const [hasOptimizedDraft, setHasOptimizedDraft] = React.useState(false);
+  const [optimizationRequest, setOptimizationRequest] = React.useState("");
+  const [optimizationComparison, setOptimizationComparison] = React.useState<{
+    original: string;
+    optimized: string;
+  } | null>(null);
   const contentEditorRef = React.useRef<HTMLTextAreaElement | null>(null);
+  const comparisonRows = React.useMemo(
+    () => optimizationComparison
+      ? buildTemplateDiff(optimizationComparison.original, optimizationComparison.optimized)
+      : [],
+    [optimizationComparison]
+  );
 
   React.useEffect(() => {
     if (selectedId === "new") {
@@ -1149,6 +1307,9 @@ function TemplatesPage(props: {
       setShowExampleImport(false);
       setExampleContent("");
       setHasImportedDraft(false);
+      setHasOptimizedDraft(false);
+      setOptimizationRequest("");
+      setOptimizationComparison(null);
     }
   }, [emptyTemplateForm, selectedId]);
 
@@ -1161,6 +1322,9 @@ function TemplatesPage(props: {
         is_default: selected.is_default
       });
       setHasImportedDraft(false);
+      setHasOptimizedDraft(false);
+      setOptimizationRequest("");
+      setOptimizationComparison(null);
     }
   }, [selected?.id]);
 
@@ -1181,6 +1345,7 @@ function TemplatesPage(props: {
       });
       setForm((current) => ({ ...current, content }));
       setHasImportedDraft(true);
+      setHasOptimizedDraft(false);
       setShowExampleImport(false);
       window.requestAnimationFrame(() => {
         contentEditorRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -1191,6 +1356,44 @@ function TemplatesPage(props: {
     }
   }
 
+  async function optimizeTemplate() {
+    if (!form.content.trim()) {
+      window.alert("请先填写需要优化的模板内容。");
+      return;
+    }
+    if (optimizationRequest.trim().length < 2) {
+      window.alert("请先填写具体的优化需求。");
+      return;
+    }
+    setIsOptimizing(true);
+    try {
+      const original = form.content;
+      const content = await props.onOptimize({
+        template_type: form.template_type,
+        content: original,
+        optimization_request: optimizationRequest.trim(),
+      });
+      setOptimizationComparison({ original, optimized: content });
+    } finally {
+      setIsOptimizing(false);
+    }
+  }
+
+  function applyOptimizedTemplate() {
+    if (!optimizationComparison) {
+      return;
+    }
+    setForm((current) => ({ ...current, content: optimizationComparison.optimized }));
+    setOptimizationComparison(null);
+    setHasImportedDraft(false);
+    setHasOptimizedDraft(true);
+    window.requestAnimationFrame(() => contentEditorRef.current?.focus());
+  }
+
+  function discardOptimizedTemplate() {
+    setOptimizationComparison(null);
+  }
+
   async function saveTemplate() {
     if (selected) {
       await props.onSave(selected.id, form);
@@ -1198,6 +1401,7 @@ function TemplatesPage(props: {
       await props.onCreate(form);
     }
     setHasImportedDraft(false);
+    setHasOptimizedDraft(false);
   }
 
   async function deleteTemplate() {
@@ -1255,7 +1459,12 @@ function TemplatesPage(props: {
           </select>
         </label>
         <label className="toggle">
-          <input type="checkbox" checked={form.is_default} onChange={(event) => setField("is_default", event.target.checked)} />
+          <input
+            type="checkbox"
+            checked={form.is_default}
+            disabled={Boolean(selected?.is_default)}
+            onChange={(event) => setField("is_default", event.target.checked)}
+          />
           设为默认模板
         </label>
         {selectedId === "new" && (
@@ -1277,7 +1486,7 @@ function TemplatesPage(props: {
                   onChange={(event) => setExampleContent(event.target.value)}
                   placeholder="粘贴一份完整示例，例如公司现有周报格式、月报格式或绩效考核表格式..."
                 />
-                <button className="primary" type="button" disabled={isImporting} onClick={() => void importExample()}>
+                <button className="primary" type="button" disabled={isImporting || isOptimizing} onClick={() => void importExample()}>
                   <Sparkles size={16} />
                   {isImporting ? "生成中" : "生成模板草稿"}
                 </button>
@@ -1291,25 +1500,64 @@ function TemplatesPage(props: {
             <span>模板草稿已填入下方“模板内容”，保存后会出现在左侧模板列表。</span>
           </div>
         )}
-        <label className="full">
-          模板内容
+        {hasOptimizedDraft && (
+          <div className="draft-callout full" role="status">
+            <CheckCircle2 size={16} />
+            <span>LLM 已优化模板内容，请检查变量和格式，确认后再保存。</span>
+          </div>
+        )}
+        <div className="template-content-field full">
+          <div className="template-content-header">
+            <label htmlFor="template-content">模板内容</label>
+          </div>
           <textarea
+            id="template-content"
             ref={contentEditorRef}
             className="template-markdown-editor"
             value={form.content}
+            disabled={isOptimizing}
             onChange={(event) => setField("content", event.target.value)}
           />
-        </label>
+          <div className="template-optimize-box">
+            <label htmlFor="optimization-request">优化需求</label>
+            <div className="template-optimize-row">
+              <textarea
+                id="optimization-request"
+                value={optimizationRequest}
+                disabled={isOptimizing}
+                maxLength={1000}
+                placeholder="例如：改成 OKR 风格，增加风险与下周计划章节，并让表达更精炼。"
+                onChange={(event) => setOptimizationRequest(event.target.value)}
+              />
+              <button
+                className="secondary"
+                type="button"
+                disabled={
+                  isOptimizing
+                  || isImporting
+                  || !form.content.trim()
+                  || optimizationRequest.trim().length < 2
+                }
+                onClick={() => void optimizeTemplate()}
+              >
+                {isOptimizing ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}
+                {isOptimizing ? "优化中" : "按需求优化"}
+              </button>
+            </div>
+            <small>AI 会生成候选版本；对比新旧差异并选择应用后，才会回填编辑器。</small>
+          </div>
+        </div>
         <div className="button-row">
           <button
             className="primary"
             type="button"
+            disabled={isOptimizing || isImporting}
             onClick={() => void saveTemplate()}
           >
             <Save size={18} />
             保存模板
           </button>
-          {selected && (
+          {selected && !selected.is_default && (
             <button className="secondary danger" type="button" onClick={() => void deleteTemplate()}>
               <Trash2 size={18} />
               删除模板
@@ -1317,6 +1565,62 @@ function TemplatesPage(props: {
           )}
         </div>
       </section>
+      {optimizationComparison && (
+        <section className="template-diff-backdrop" role="presentation">
+          <div
+            className="template-diff-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="template-diff-title"
+          >
+            <div className="dialog-heading">
+              <div>
+                <p className="section-eyebrow">LLM 优化结果</p>
+                <h2 id="template-diff-title">对比模板修改</h2>
+                <p>红色为原内容中删除的行，绿色为优化版本新增的行。</p>
+              </div>
+            </div>
+            <div className="template-diff-summary" aria-label="差异统计">
+              <span className="removed">
+                删除 {comparisonRows.filter((row) => row.kind === "removed").length} 行
+              </span>
+              <span className="added">
+                新增 {comparisonRows.filter((row) => row.kind === "added").length} 行
+              </span>
+            </div>
+            <div className="template-diff-view">
+              <div className="template-diff-column-heading">原模板</div>
+              <div className="template-diff-column-heading optimized">优化后</div>
+              <div className="template-diff-rows">
+                {comparisonRows.map((row, index) => (
+                  <div className={`template-diff-row ${row.kind}`} key={`${row.kind}-${index}`}>
+                    <div className="template-diff-cell old">
+                      <span className="template-diff-line-number">{row.oldLineNumber ?? ""}</span>
+                      <pre>{row.oldText ?? " "}</pre>
+                    </div>
+                    <div className="template-diff-cell new">
+                      <span className="template-diff-line-number">{row.newLineNumber ?? ""}</span>
+                      <pre>{row.newText ?? " "}</pre>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="template-diff-actions">
+              <p>应用后仅替换编辑器内容，仍需点击“保存模板”才会写入。</p>
+              <div>
+                <button className="secondary" type="button" onClick={discardOptimizedTemplate}>
+                  不应用
+                </button>
+                <button className="primary" type="button" onClick={applyOptimizedTemplate}>
+                  <CheckCircle2 size={17} />
+                  应用优化
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
     </div>
   );
 }
@@ -1324,11 +1628,17 @@ function TemplatesPage(props: {
 function SettingsPage(props: {
   setting: LlmSetting | null;
   settings: LlmSetting[];
+  templates: Template[];
   emailSetting: EmailSetting | null;
   recipients: Recipient[];
+  reportSchedules: ReportSchedule[];
   onSave: (payload: LlmSetting) => Promise<void>;
   onApplyLlmSetting: (id: number) => Promise<void>;
   onDeleteLlmSetting: (id: number) => Promise<void>;
+  onSaveReportSchedule: (
+    reportType: ReportType,
+    payload: Pick<ReportSchedule, "enabled" | "weekday" | "day_of_month" | "template_id" | "run_time" | "auto_send" | "recipient_ids">
+  ) => Promise<void>;
   onSaveEmail: (payload: EmailSetting) => Promise<void>;
   onTestEmail: (address: string) => Promise<void>;
   onCreateRecipient: (payload: Pick<Recipient, "name" | "email" | "is_default">) => Promise<void>;
@@ -1583,6 +1893,13 @@ function SettingsPage(props: {
           </button>
         </div>
       </form>
+      <ReportSchedulesPanel
+        schedules={props.reportSchedules}
+        templates={props.templates}
+        emailSetting={props.emailSetting}
+        recipients={props.recipients}
+        onSave={props.onSaveReportSchedule}
+      />
       <EmailSettingsPanel setting={props.emailSetting} onSave={props.onSaveEmail} onTest={props.onTestEmail} />
       <RecipientDirectory
         recipients={props.recipients}
@@ -1592,6 +1909,273 @@ function SettingsPage(props: {
       />
     </div>
   );
+}
+
+const weekdayLabels: Record<ScheduleWeekday, string> = {
+  mon: "周一",
+  tue: "周二",
+  wed: "周三",
+  thu: "周四",
+  fri: "周五",
+  sat: "周六",
+  sun: "周日"
+};
+
+function ReportSchedulesPanel(props: {
+  schedules: ReportSchedule[];
+  templates: Template[];
+  emailSetting: EmailSetting | null;
+  recipients: Recipient[];
+  onSave: (
+    reportType: ReportType,
+    payload: Pick<ReportSchedule, "enabled" | "weekday" | "day_of_month" | "template_id" | "run_time" | "auto_send" | "recipient_ids">
+  ) => Promise<void>;
+}) {
+  return (
+    <section className="panel settings-panel report-schedules-panel">
+      <div className="settings-intro">
+        <p className="section-eyebrow">自动生成</p>
+        <h2>定时报告</h2>
+        <p>每种报告独立设置执行时间；定时生成不会覆盖同期间已有草稿。</p>
+        <div className="settings-side-note">
+          <span>错过执行</span>
+          <strong>启动后只补生成最近一期草稿</strong>
+          <p>补生成不会自动发送邮件，避免应用启动时意外投递。</p>
+        </div>
+      </div>
+      <div className="schedule-card-grid">
+        {props.schedules.map((schedule) => (
+          <ReportScheduleCard
+            key={schedule.report_type}
+            schedule={schedule}
+            templates={props.templates.filter((template) => template.template_type === schedule.report_type)}
+            emailSetting={props.emailSetting}
+            recipients={props.recipients}
+            onSave={props.onSave}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ReportScheduleCard(props: {
+  schedule: ReportSchedule;
+  templates: Template[];
+  emailSetting: EmailSetting | null;
+  recipients: Recipient[];
+  onSave: (
+    reportType: ReportType,
+    payload: Pick<ReportSchedule, "enabled" | "weekday" | "day_of_month" | "template_id" | "run_time" | "auto_send" | "recipient_ids">
+  ) => Promise<void>;
+}) {
+  const toForm = React.useCallback((schedule: ReportSchedule) => ({
+    weekday: (schedule.weekday ?? "fri") as ScheduleWeekday,
+    day_of_month: schedule.day_of_month ?? null,
+    template_id: schedule.template_id ?? null,
+    run_time: schedule.run_time.slice(0, 5),
+    auto_send: schedule.auto_send,
+    recipient_ids: [...schedule.recipient_ids]
+  }), []);
+  const [form, setForm] = React.useState(() => toForm(props.schedule));
+  const [isToggling, setIsToggling] = React.useState(false);
+
+  React.useEffect(() => {
+    setForm(toForm(props.schedule));
+  }, [props.schedule.updated_at, toForm]);
+
+  const missingSmtp = form.auto_send && !props.emailSetting;
+  const missingRecipients = form.auto_send && form.recipient_ids.length === 0;
+  const invalidAutoSend = missingSmtp || missingRecipients;
+  const monthly = props.schedule.report_type !== "weekly_report";
+  const defaultTemplate = props.templates.find((template) => template.is_default);
+  const selectedTemplate = props.templates.find((template) => template.id === form.template_id);
+
+  function payload(enabled: boolean) {
+    return {
+      enabled,
+      weekday: monthly ? null : form.weekday,
+      day_of_month: monthly ? form.day_of_month : null,
+      template_id: form.template_id,
+      run_time: form.run_time,
+      auto_send: form.auto_send,
+      recipient_ids: form.recipient_ids
+    };
+  }
+
+  function toggleRecipient(recipientId: number) {
+    setForm((current) => ({
+      ...current,
+      recipient_ids: current.recipient_ids.includes(recipientId)
+        ? current.recipient_ids.filter((id) => id !== recipientId)
+        : [...current.recipient_ids, recipientId]
+    }));
+  }
+
+  async function save(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (invalidAutoSend) {
+      return;
+    }
+    await props.onSave(props.schedule.report_type, payload(props.schedule.enabled));
+  }
+
+  async function toggleEnabled() {
+    if (invalidAutoSend || !form.run_time || isToggling) {
+      return;
+    }
+    setIsToggling(true);
+    try {
+      await props.onSave(props.schedule.report_type, payload(!props.schedule.enabled));
+    } finally {
+      setIsToggling(false);
+    }
+  }
+
+  return (
+    <form className={props.schedule.enabled ? "schedule-card active" : "schedule-card"} onSubmit={(event) => void save(event)}>
+      <div className="schedule-card-heading">
+        <div>
+          <p className="section-eyebrow">自动生成状态</p>
+          <h3>{reportLabels[props.schedule.report_type]}</h3>
+        </div>
+        <button
+          className={props.schedule.enabled ? "schedule-enable-button enabled" : "schedule-enable-button"}
+          type="button"
+          aria-pressed={props.schedule.enabled}
+          disabled={invalidAutoSend || !form.run_time || isToggling}
+          onClick={() => void toggleEnabled()}
+        >
+          <span className="schedule-status-dot" aria-hidden="true" />
+          <span>
+            <strong>{isToggling ? "正在保存…" : props.schedule.enabled ? "已启用" : "已停用"}</strong>
+            <small>{props.schedule.enabled ? "点击停用" : "点击启用"}</small>
+          </span>
+        </button>
+      </div>
+
+      <div className="schedule-fields">
+        {monthly ? (
+          <label>
+            每月执行日期
+            <select
+              value={form.day_of_month ?? "last"}
+              onChange={(event) => setForm({
+                ...form,
+                day_of_month: event.target.value === "last" ? null : Number(event.target.value)
+              })}
+            >
+              <option value="last">每月最后一天</option>
+              {Array.from({ length: 28 }, (_, index) => index + 1).map((day) => (
+                <option value={day} key={day}>每月 {day} 日</option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <label>
+            每周执行日期
+            <select
+              value={form.weekday}
+              onChange={(event) => setForm({ ...form, weekday: event.target.value as ScheduleWeekday })}
+            >
+              {(Object.keys(weekdayLabels) as ScheduleWeekday[]).map((weekday) => (
+                <option value={weekday} key={weekday}>{weekdayLabels[weekday]}</option>
+              ))}
+            </select>
+          </label>
+        )}
+        <label>
+          执行时间
+          <input
+            type="time"
+            required
+            value={form.run_time}
+            onChange={(event) => setForm({ ...form, run_time: event.target.value })}
+          />
+        </label>
+      </div>
+
+      <label className="schedule-template-field">
+        报告模板
+        <select
+          value={form.template_id ?? ""}
+          onChange={(event) => setForm({
+            ...form,
+            template_id: event.target.value ? Number(event.target.value) : null
+          })}
+        >
+          <option value="">
+            跟随默认模板{defaultTemplate ? `（${defaultTemplate.name}）` : ""}
+          </option>
+          {props.templates.map((template) => (
+            <option value={template.id} key={template.id}>
+              {template.name}{template.is_default ? "（当前默认）" : ""}
+            </option>
+          ))}
+        </select>
+        <small>
+          {selectedTemplate
+            ? `已固定使用「${selectedTemplate.name}」，默认模板变化不会影响此任务。`
+            : "当前跟随该报告类型的默认模板。"}
+        </small>
+      </label>
+
+      <label className="toggle schedule-send-toggle">
+        <input
+          type="checkbox"
+          checked={form.auto_send}
+          onChange={(event) => setForm({ ...form, auto_send: event.target.checked })}
+        />
+        <span className="toggle-copy">
+          <strong>生成后直接发送邮件</strong>
+          <small>{form.auto_send ? "报告生成成功后将立即投递" : "当前仅生成草稿，不会发送邮件"}</small>
+        </span>
+        <span className={form.auto_send ? "toggle-state enabled" : "toggle-state"}>
+          {form.auto_send ? "已开启" : "已关闭"}
+        </span>
+      </label>
+
+      {form.auto_send && (
+        <fieldset className="schedule-recipients">
+          <legend>自动发送收件人 · 已选择 {form.recipient_ids.length} 位</legend>
+          {props.recipients.length ? props.recipients.map((recipient) => (
+            <label className="recipient-check" key={recipient.id}>
+              <input
+                type="checkbox"
+                checked={form.recipient_ids.includes(recipient.id)}
+                onChange={() => toggleRecipient(recipient.id)}
+              />
+              <span><strong>{recipient.name}</strong><small>{recipient.email}</small></span>
+            </label>
+          )) : <p className="form-hint">通讯录暂无收件人，请先在下方添加。</p>}
+        </fieldset>
+      )}
+
+      {missingSmtp && <p className="field-error">请先保存 SMTP 邮箱配置，再启用自动发送。</p>}
+      {missingRecipients && <p className="field-error">自动发送至少需要选择一位收件人。</p>}
+
+      <div className="schedule-footer">
+        <div>
+          <span>下次执行</span>
+          <strong>{props.schedule.enabled && props.schedule.next_run_at ? formatScheduleDate(props.schedule.next_run_at) : "未安排"}</strong>
+        </div>
+        <button className="primary" type="submit" disabled={invalidAutoSend || !form.run_time}>
+          <Save size={16} />保存设置
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function formatScheduleDate(value: string) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(new Date(value));
 }
 
 function EmailSettingsPanel(props: {

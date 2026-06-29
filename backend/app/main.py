@@ -9,7 +9,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.constants import EmailDeliveryStatus, ReportType
+from app.constants import ReportType
 from app.database import SessionLocal, get_db, init_db
 from app.models import (
     EmailSetting,
@@ -18,11 +18,18 @@ from app.models import (
     Recipient,
     Report,
     ReportEmailDelivery,
+    ReportSchedule,
     Template,
     WorkLog,
     utcnow,
 )
-from app.scheduler import start_scheduler, stop_scheduler
+from app.scheduler import (
+    next_run_at,
+    seed_default_report_schedules,
+    start_scheduler,
+    stop_scheduler,
+    sync_report_schedule,
+)
 from app.schemas import (
     GenerateResponse,
     HealthResponse,
@@ -40,10 +47,14 @@ from app.schemas import (
     ReportEmailSendRequest,
     ReportGenerateRequest,
     ReportRead,
+    ReportScheduleRead,
+    ReportScheduleUpdate,
     ReportUpdate,
     TemplateCreate,
     TemplateImportExampleRequest,
     TemplateImportExampleResponse,
+    TemplateOptimizeRequest,
+    TemplateOptimizeResponse,
     TemplateRead,
     TemplateUpdate,
     WorkLogCreate,
@@ -51,7 +62,14 @@ from app.schemas import (
     WorkLogUpdate,
 )
 from app.services.docx_export import markdown_to_docx
-from app.services.email import EmailDeliveryError, markdown_to_email_html, send_email
+from app.services.email import (
+    EmailConfigurationError,
+    EmailDeliveryError,
+    RecipientSelectionError,
+    active_email_setting,
+    deliver_report_email,
+    send_email,
+)
 from app.services.llm import LLMClient, LLMProviderError
 from app.services.reports import create_report, report_to_dict_source_ids, seed_default_templates
 from app.services.reports import active_llm_setting
@@ -63,6 +81,7 @@ async def lifespan(app: FastAPI):
     init_db()
     with SessionLocal() as db:
         seed_default_templates(db)
+        seed_default_report_schedules(db)
     start_scheduler()
     yield
     stop_scheduler()
@@ -118,8 +137,21 @@ def report_email_delivery_read(delivery: ReportEmailDelivery) -> ReportEmailDeli
     )
 
 
-def active_email_setting(db: Session) -> EmailSetting | None:
-    return db.scalar(select(EmailSetting).where(EmailSetting.is_active.is_(True)).order_by(EmailSetting.id.desc()))
+def report_schedule_read(schedule: ReportSchedule) -> ReportScheduleRead:
+    return ReportScheduleRead(
+        id=schedule.id,
+        report_type=schedule.report_type,
+        enabled=schedule.enabled,
+        weekday=schedule.weekday,
+        day_of_month=schedule.day_of_month,
+        template_id=schedule.template_id,
+        run_time=schedule.run_time,
+        auto_send=schedule.auto_send,
+        recipient_ids=[recipient.id for recipient in schedule.recipients],
+        next_run_at=next_run_at(schedule) if schedule.enabled else None,
+        created_at=schedule.created_at,
+        updated_at=schedule.updated_at,
+    )
 
 
 def llm_setting_read(item: LLMSetting) -> LLMSettingRead:
@@ -228,7 +260,15 @@ def list_templates(
     stmt = select(Template)
     if template_type:
         stmt = stmt.where(Template.template_type == template_type.value)
-    return list(db.scalars(stmt.order_by(Template.template_type.asc(), Template.is_default.desc())))
+    return list(
+        db.scalars(
+            stmt.order_by(
+                Template.is_default.desc(),
+                Template.created_at.desc(),
+                Template.name.asc(),
+            )
+        )
+    )
 
 
 @app.post("/api/templates", response_model=TemplateRead, status_code=201)
@@ -278,6 +318,33 @@ def import_template_from_example(
     )
 
 
+@app.post("/api/templates/optimize", response_model=TemplateOptimizeResponse)
+def optimize_template(
+    payload: TemplateOptimizeRequest,
+    db: Session = Depends(get_db),
+) -> TemplateOptimizeResponse:
+    try:
+        validate_template_content(payload.content)
+        result = LLMClient().optimize_template(
+            active_llm_setting(db),
+            payload.template_type,
+            payload.content,
+            payload.optimization_request,
+        )
+        validate_template_content(result.content)
+    except TemplateValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except LLMProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return TemplateOptimizeResponse(
+        template_type=payload.template_type,
+        content=result.content,
+        used_llm=result.used_llm,
+    )
+
+
 @app.put("/api/templates/{template_id}", response_model=TemplateRead)
 def update_template(template_id: int, payload: TemplateUpdate, db: Session = Depends(get_db)) -> Template:
     item = db.get(Template, template_id)
@@ -292,6 +359,20 @@ def update_template(template_id: int, payload: TemplateUpdate, db: Session = Dep
     new_type = update_data.get("template_type", item.template_type)
     if hasattr(new_type, "value"):
         new_type = new_type.value
+    if item.is_default and update_data.get("is_default") is False:
+        raise HTTPException(
+            status_code=409,
+            detail="默认模板不能直接取消默认状态，请将同类型的其他模板设为默认",
+        )
+    if new_type != item.template_type:
+        linked_schedule = db.scalar(
+            select(ReportSchedule).where(ReportSchedule.template_id == item.id)
+        )
+        if linked_schedule:
+            raise HTTPException(
+                status_code=409,
+                detail="该模板正在被定时报告使用，不能更改报告类型",
+            )
     if update_data.get("is_default"):
         db.query(Template).filter(Template.template_type == new_type).update({"is_default": False})
     for key, value in update_data.items():
@@ -306,11 +387,17 @@ def delete_template(template_id: int, db: Session = Depends(get_db)) -> None:
     item = db.get(Template, template_id)
     if not item:
         raise HTTPException(status_code=404, detail="Template not found")
+    if item.is_default:
+        raise HTTPException(status_code=409, detail="默认模板不能删除")
     same_type_count = db.scalar(
         select(func.count()).select_from(Template).where(Template.template_type == item.template_type)
     )
     if same_type_count == 1:
         raise HTTPException(status_code=400, detail="Cannot delete the last template for a report type")
+    db.query(ReportSchedule).filter(ReportSchedule.template_id == template_id).update(
+        {"template_id": None},
+        synchronize_session=False,
+    )
     db.delete(item)
     db.commit()
 
@@ -422,66 +509,85 @@ def send_report_email(
     report = db.get(Report, report_id)
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
-    setting = active_email_setting(db)
-    if not setting:
-        raise HTTPException(status_code=400, detail="请先在设置中完成 SMTP 邮箱配置")
-
-    selected_ids = list(dict.fromkeys(payload.recipient_ids))
-    contacts = list(db.scalars(select(Recipient).where(Recipient.id.in_(selected_ids)))) if selected_ids else []
-    found_ids = {contact.id for contact in contacts}
-    if found_ids != set(selected_ids):
-        raise HTTPException(status_code=422, detail="存在已删除或无效的收件人")
-
-    snapshots: list[dict[str, str | None]] = []
-    recipient_addresses: list[str] = []
-    seen_addresses: set[str] = set()
-    for contact in contacts:
-        if contact.email not in seen_addresses:
-            snapshots.append({"name": contact.name, "email": contact.email})
-            recipient_addresses.append(contact.email)
-            seen_addresses.add(contact.email)
-    for address in payload.additional_recipients:
-        if address not in seen_addresses:
-            snapshots.append({"name": None, "email": address})
-            recipient_addresses.append(address)
-            seen_addresses.add(address)
-    if not recipient_addresses:
-        raise HTTPException(status_code=422, detail="至少需要一位有效收件人")
-
-    delivery = ReportEmailDelivery(
-        report_id=report.id,
-        subject=payload.subject,
-        recipients_json=json.dumps(snapshots, ensure_ascii=False),
-        content_markdown=report.content_markdown,
-        status=EmailDeliveryStatus.PENDING.value,
-    )
-    db.add(delivery)
-    db.commit()
-    db.refresh(delivery)
-
-    filename = f"worklog-{report.report_type}-{report.period_start}-{report.period_end}.docx"
     try:
-        send_email(
-            setting,
-            recipient_addresses,
+        delivery = deliver_report_email(
+            db,
+            report,
+            payload.recipient_ids,
             payload.subject,
-            report.content_markdown,
-            markdown_to_email_html(report.content_markdown),
-            filename,
-            markdown_to_docx(report.content_markdown).getvalue(),
+            payload.additional_recipients,
+            sender=send_email,
         )
+    except EmailConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RecipientSelectionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except EmailDeliveryError as exc:
-        delivery.status = EmailDeliveryStatus.FAILED.value
-        delivery.error_message = str(exc)
-        db.commit()
-        db.refresh(delivery)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    delivery.status = EmailDeliveryStatus.SENT.value
-    delivery.sent_at = utcnow()
-    db.commit()
-    db.refresh(delivery)
     return report_email_delivery_read(delivery)
+
+
+@app.get("/api/settings/report-schedules", response_model=list[ReportScheduleRead])
+def list_report_schedules(db: Session = Depends(get_db)) -> list[ReportScheduleRead]:
+    schedules = list(db.scalars(select(ReportSchedule).order_by(ReportSchedule.id.asc())))
+    order = {report_type.value: index for index, report_type in enumerate(ReportType)}
+    schedules.sort(key=lambda item: order[item.report_type])
+    return [report_schedule_read(item) for item in schedules]
+
+
+@app.put(
+    "/api/settings/report-schedules/{report_type}",
+    response_model=ReportScheduleRead,
+)
+def update_report_schedule(
+    report_type: ReportType,
+    payload: ReportScheduleUpdate,
+    db: Session = Depends(get_db),
+) -> ReportScheduleRead:
+    if report_type == ReportType.WEEKLY:
+        if not payload.weekday:
+            raise HTTPException(status_code=422, detail="周报必须选择执行星期")
+        if payload.day_of_month is not None:
+            raise HTTPException(status_code=422, detail="周报不能设置每月执行日期")
+    elif payload.weekday is not None:
+        raise HTTPException(status_code=422, detail="月报和绩效表不能设置执行星期")
+
+    selected_ids = set(payload.recipient_ids)
+    recipients = (
+        list(db.scalars(select(Recipient).where(Recipient.id.in_(selected_ids))))
+        if selected_ids
+        else []
+    )
+    if {recipient.id for recipient in recipients} != selected_ids:
+        raise HTTPException(status_code=422, detail="存在已删除或无效的收件人")
+    if payload.template_id is not None:
+        template = db.get(Template, payload.template_id)
+        if not template or template.template_type != report_type.value:
+            raise HTTPException(status_code=422, detail="所选模板不存在或不适用于该报告类型")
+    if payload.auto_send:
+        if not active_email_setting(db):
+            raise HTTPException(status_code=422, detail="启用自动发送前请先保存 SMTP 邮箱配置")
+        if not recipients:
+            raise HTTPException(status_code=422, detail="启用自动发送时至少选择一位收件人")
+
+    item = db.scalar(
+        select(ReportSchedule).where(ReportSchedule.report_type == report_type.value)
+    )
+    if not item:
+        item = ReportSchedule(report_type=report_type.value, run_time=payload.run_time)
+        db.add(item)
+    item.enabled = payload.enabled
+    item.weekday = payload.weekday if report_type == ReportType.WEEKLY else None
+    item.day_of_month = payload.day_of_month if report_type != ReportType.WEEKLY else None
+    item.template_id = payload.template_id
+    item.run_time = payload.run_time.replace(second=0, microsecond=0)
+    item.auto_send = payload.auto_send
+    item.recipients = recipients
+    item.updated_at = utcnow()
+    db.commit()
+    db.refresh(item)
+    sync_report_schedule(report_type.value)
+    return report_schedule_read(item)
 
 
 @app.get("/api/settings/llm", response_model=LLMSettingRead | None)
@@ -670,5 +776,7 @@ def delete_recipient(recipient_id: int, db: Session = Depends(get_db)) -> None:
     item = db.get(Recipient, recipient_id)
     if not item:
         raise HTTPException(status_code=404, detail="Recipient not found")
+    if item.report_schedules:
+        raise HTTPException(status_code=409, detail="该收件人正在被定时报告使用，请先从定时配置中移除")
     db.delete(item)
     db.commit()

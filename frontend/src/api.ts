@@ -6,9 +6,11 @@ import type {
   Recipient,
   Report,
   ReportEmailDelivery,
+  ReportSchedule,
   ReportType,
   Template,
   TemplateImportExampleResponse,
+  TemplateOptimizeResponse,
   WorkLog
 } from "./types";
 
@@ -55,6 +57,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload)
     }),
+  optimizeTemplate: (payload: { template_type: ReportType; content: string; optimization_request: string }) =>
+    request<TemplateOptimizeResponse>("/api/templates/optimize", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
   updateTemplate: (id: number, payload: Partial<Template>) =>
     request<Template>(`/api/templates/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
   deleteTemplate: (id: number) => request<void>(`/api/templates/${id}`, { method: "DELETE" }),
@@ -83,6 +90,15 @@ export const api = {
     subject: string;
   }) => request<ReportEmailDelivery>(`/api/reports/${id}/send-email`, {
     method: "POST",
+    body: JSON.stringify(payload)
+  }),
+
+  listReportSchedules: () => request<ReportSchedule[]>("/api/settings/report-schedules"),
+  updateReportSchedule: (
+    reportType: ReportType,
+    payload: Pick<ReportSchedule, "enabled" | "weekday" | "day_of_month" | "template_id" | "run_time" | "auto_send" | "recipient_ids">
+  ) => request<ReportSchedule>(`/api/settings/report-schedules/${reportType}`, {
+    method: "PUT",
     body: JSON.stringify(payload)
   }),
 

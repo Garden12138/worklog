@@ -1,9 +1,9 @@
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import select
 
 from app.constants import ReportType, TaskStatus
-from app.models import GenerationTask, LLMSetting
+from app.models import GenerationTask, LLMSetting, Template
 from app.services.llm import LLMProviderError, LLMResult
 from app.services.reports import create_missing_report
 
@@ -62,6 +62,60 @@ def test_create_work_log_generate_report_and_export_docx(client, db_session):
     task = db_session.get(GenerationTask, data["task_id"])
     assert task is not None
     assert task.report_id is None
+
+
+def test_templates_pin_defaults_and_sort_custom_items(client, db_session):
+    created_at = datetime(2026, 6, 29, 8, 0, tzinfo=timezone.utc)
+    db_session.add_all(
+        [
+            Template(
+                name="较早模板",
+                template_type="weekly_report",
+                content="# {{ title }}\n\n{{ ai_content }}",
+                is_default=False,
+                created_at=created_at,
+            ),
+            Template(
+                name="B模板",
+                template_type="monthly_report",
+                content="# {{ title }}\n\n{{ ai_content }}",
+                is_default=False,
+                created_at=created_at + timedelta(hours=1),
+            ),
+            Template(
+                name="A模板",
+                template_type="performance_review",
+                content="# {{ title }}\n\n{{ ai_content }}",
+                is_default=False,
+                created_at=created_at + timedelta(hours=1),
+            ),
+        ]
+    )
+    db_session.commit()
+
+    listed = client.get("/api/templates")
+
+    assert listed.status_code == 200
+    items = listed.json()
+    default_count = sum(item["is_default"] for item in items)
+    assert default_count == 3
+    assert all(item["is_default"] for item in items[:default_count])
+    assert [item["name"] for item in items[default_count:]] == ["A模板", "B模板", "较早模板"]
+
+
+def test_default_template_cannot_be_deleted_or_directly_demoted(client):
+    default_template = next(item for item in client.get("/api/templates").json() if item["is_default"])
+
+    deleted = client.delete(f"/api/templates/{default_template['id']}")
+    demoted = client.put(
+        f"/api/templates/{default_template['id']}",
+        json={"is_default": False},
+    )
+
+    assert deleted.status_code == 409
+    assert deleted.json()["detail"] == "默认模板不能删除"
+    assert demoted.status_code == 409
+    assert "不能直接取消默认状态" in demoted.json()["detail"]
 
 
 def test_work_logs_support_pagination_and_date_ranges(client):
@@ -375,6 +429,80 @@ def test_import_template_from_example_returns_provider_error(client, monkeypatch
 
     assert response.status_code == 502
     assert response.json()["detail"].endswith("Model not found")
+
+
+def test_optimize_template_uses_llm(client, monkeypatch):
+    client.put(
+        "/api/settings/llm",
+        json={
+            "provider": "openai",
+            "base_url": "https://example.test/v1",
+            "model": "template-model",
+            "api_key": "sk-template-secret",
+            "extra_headers": {},
+        },
+    )
+
+    def fake_optimize_template(
+        self, setting, template_type, template_content, optimization_request
+    ):
+        assert setting.api_key == "sk-template-secret"
+        assert template_type == ReportType.WEEKLY
+        assert template_content == "# {{ title }}\n\n{{ ai_content }}"
+        assert optimization_request == "改成 OKR 风格，并增加报告周期"
+        return LLMResult(
+            content=(
+                "# {{ title }}\n\n"
+                "> 报告周期：{{ period_start }} 至 {{ period_end }}\n\n"
+                "## 工作总结\n\n{{ ai_content }}"
+            ),
+            used_llm=True,
+        )
+
+    monkeypatch.setattr("app.main.LLMClient.optimize_template", fake_optimize_template)
+    response = client.post(
+        "/api/templates/optimize",
+        json={
+            "template_type": "weekly_report",
+            "content": "# {{ title }}\n\n{{ ai_content }}",
+            "optimization_request": "改成 OKR 风格，并增加报告周期",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["used_llm"] is True
+    assert "## 工作总结" in data["content"]
+    assert "{{ ai_content }}" in data["content"]
+
+
+def test_optimize_template_rejects_invalid_llm_result(client, monkeypatch):
+    client.put(
+        "/api/settings/llm",
+        json={
+            "provider": "openai",
+            "base_url": "https://example.test/v1",
+            "model": "template-model",
+            "api_key": "sk-template-secret",
+            "extra_headers": {},
+        },
+    )
+
+    monkeypatch.setattr(
+        "app.main.LLMClient.optimize_template",
+        lambda *args: LLMResult(content="# {{ unsupported }}", used_llm=True),
+    )
+    response = client.post(
+        "/api/templates/optimize",
+        json={
+            "template_type": "weekly_report",
+            "content": "# {{ title }}\n\n{{ ai_content }}",
+            "optimization_request": "精简模板内容",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "unsupported" in response.json()["detail"]
 
 
 def test_generate_performance_report_fills_placeholder_template(client, monkeypatch):

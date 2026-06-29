@@ -1,9 +1,31 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import (
+    Boolean,
+    Column,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Table,
+    Text,
+    Time,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+
+report_schedule_recipients = Table(
+    "report_schedule_recipients",
+    Base.metadata,
+    Column("schedule_id", ForeignKey("report_schedules.id", ondelete="CASCADE"), primary_key=True),
+    Column("recipient_id", ForeignKey("recipients.id", ondelete="RESTRICT"), primary_key=True),
+)
 
 
 def utcnow() -> datetime:
@@ -80,6 +102,34 @@ class Recipient(TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(160))
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    report_schedules: Mapped[list["ReportSchedule"]] = relationship(
+        "ReportSchedule",
+        secondary=report_schedule_recipients,
+        back_populates="recipients",
+    )
+
+
+class ReportSchedule(TimestampMixin, Base):
+    __tablename__ = "report_schedules"
+    __table_args__ = (UniqueConstraint("report_type", name="uq_report_schedules_report_type"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    report_type: Mapped[str] = mapped_column(String(48), index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    weekday: Mapped[str | None] = mapped_column(String(3), default=None)
+    day_of_month: Mapped[int | None] = mapped_column(Integer, default=None)
+    template_id: Mapped[int | None] = mapped_column(
+        ForeignKey("templates.id", ondelete="SET NULL"), default=None
+    )
+    run_time: Mapped[time] = mapped_column(Time)
+    auto_send: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    recipients: Mapped[list[Recipient]] = relationship(
+        "Recipient",
+        secondary=report_schedule_recipients,
+        back_populates="report_schedules",
+    )
 
 
 class Report(TimestampMixin, Base):

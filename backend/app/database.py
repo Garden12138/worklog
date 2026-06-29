@@ -62,3 +62,10 @@ def ensure_sqlite_columns() -> None:
             connection.execute(
                 text("UPDATE llm_settings SET timeout_seconds = 180 WHERE provider = 'nvidia'")
             )
+
+        schedule_columns = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(report_schedules)")).fetchall()
+        }
+        if schedule_columns and "template_id" not in schedule_columns:
+            connection.execute(text("ALTER TABLE report_schedules ADD COLUMN template_id INTEGER"))
