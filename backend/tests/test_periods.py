@@ -1,7 +1,7 @@
-from datetime import date
+from datetime import date, datetime, timezone
 
 from app.constants import ReportType
-from app.services.periods import month_period, resolve_period, week_period
+from app.services.periods import format_local_datetime, month_period, resolve_period, week_period
 
 
 def test_week_period_uses_monday_to_sunday():
@@ -18,3 +18,9 @@ def test_resolve_explicit_period_wins():
         period_start=date(2026, 6, 1),
         period_end=date(2026, 6, 3),
     ) == (date(2026, 6, 1), date(2026, 6, 3))
+
+
+def test_format_local_datetime_uses_application_timezone():
+    value = datetime(2026, 6, 29, 2, 26, 59, tzinfo=timezone.utc)
+
+    assert format_local_datetime(value) == "2026-06-29 10:26:59"

@@ -62,11 +62,16 @@ export interface Report {
 }
 
 export interface LlmSetting {
+  id?: number;
   provider: Provider;
   base_url: string;
   model: string;
   api_key?: string | null;
   extra_headers: Record<string, string>;
+  timeout_seconds: number;
+  is_active?: boolean;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface EmailSetting {

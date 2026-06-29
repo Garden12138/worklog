@@ -50,3 +50,15 @@ def ensure_sqlite_columns() -> None:
             connection.execute(
                 text("CREATE INDEX IF NOT EXISTS ix_work_logs_end_date ON work_logs (end_date)")
             )
+
+        llm_columns = {
+            row[1]
+            for row in connection.execute(text("PRAGMA table_info(llm_settings)")).fetchall()
+        }
+        if llm_columns and "timeout_seconds" not in llm_columns:
+            connection.execute(
+                text("ALTER TABLE llm_settings ADD COLUMN timeout_seconds INTEGER NOT NULL DEFAULT 60")
+            )
+            connection.execute(
+                text("UPDATE llm_settings SET timeout_seconds = 180 WHERE provider = 'nvidia'")
+            )

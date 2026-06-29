@@ -125,6 +125,7 @@ class LLMSettingBase(BaseModel):
     model: str = Field(default="gpt-4.1-mini", min_length=1, max_length=160)
     api_key: str | None = None
     extra_headers: dict[str, str] = Field(default_factory=dict)
+    timeout_seconds: int = Field(default=60, ge=5, le=600)
 
     @field_validator("base_url")
     @classmethod
@@ -142,11 +143,16 @@ class LLMSettingUpdate(LLMSettingBase):
 
 
 class LLMSettingRead(BaseModel):
+    id: int
     provider: LLMProvider
     base_url: str
     model: str
     api_key: str | None
     extra_headers: dict[str, str] = Field(default_factory=dict)
+    timeout_seconds: int
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
 
     @field_validator("api_key")
     @classmethod

@@ -87,8 +87,15 @@ export const api = {
   }),
 
   getLlmSetting: () => request<LlmSetting | null>("/api/settings/llm"),
-  updateLlmSetting: (payload: LlmSetting) =>
+  listLlmSettings: () => request<LlmSetting[]>("/api/settings/llm/all"),
+  createLlmSetting: (payload: LlmSetting) =>
     request<LlmSetting>("/api/settings/llm", { method: "PUT", body: JSON.stringify(payload) }),
+  updateLlmSetting: (id: number, payload: LlmSetting) =>
+    request<LlmSetting>(`/api/settings/llm/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+  applyLlmSetting: (id: number) =>
+    request<LlmSetting>(`/api/settings/llm/${id}/apply`, { method: "POST" }),
+  deleteLlmSetting: (id: number) =>
+    request<void>(`/api/settings/llm/${id}`, { method: "DELETE" }),
   getEmailSetting: () => request<EmailSetting | null>("/api/settings/email"),
   updateEmailSetting: (payload: EmailSetting) =>
     request<EmailSetting>("/api/settings/email", { method: "PUT", body: JSON.stringify(payload) }),

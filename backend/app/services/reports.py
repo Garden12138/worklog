@@ -9,8 +9,8 @@ from app.constants import ReportStatus, ReportType, TaskStatus
 from app.default_templates import DEFAULT_TEMPLATES
 from app.models import GenerationTask, LLMSetting, Report, Template, WorkLog, utcnow
 from app.services.llm import LLMClient, format_logs_for_prompt
-from app.services.periods import resolve_period
-from app.services.templates import render_template, validate_template_content
+from app.services.periods import format_local_datetime, resolve_period
+from app.services.templates import render_template, requires_llm_template_fill, validate_template_content
 
 
 REPORT_TITLES = {
@@ -20,6 +20,17 @@ REPORT_TITLES = {
 }
 _ACTIVE_GENERATION_KEYS: set[tuple[str, date, date]] = set()
 _ACTIVE_GENERATION_LOCK = Lock()
+
+
+class TemplateList(list):
+    """A template value that supports both Markdown output and Jinja iteration."""
+
+    def __init__(self, values: list[object], markdown: str):
+        super().__init__(values)
+        self.markdown = markdown
+
+    def __str__(self) -> str:
+        return self.markdown
 
 
 def seed_default_templates(db: Session) -> None:
@@ -86,23 +97,55 @@ def build_report_context(
     period: tuple[date, date],
     work_logs: list[WorkLog],
     ai_content: str,
-) -> dict[str, str]:
+) -> dict[str, object]:
     title = f"{period[0]} 至 {period[1]} {REPORT_TITLES[report_type]}"
     results = [item.result for item in work_logs if item.result]
     blockers = [item.blockers for item in work_logs if item.blockers]
-    work_items = format_logs_for_prompt(work_logs) or "- 暂无工作记录"
+    work_item_rows: list[object] = []
+    for item in work_logs:
+        date_label = (
+            str(item.start_date)
+            if item.start_date == item.end_date
+            else f"{item.start_date} 至 {item.end_date}"
+        )
+        work_item_rows.append(
+            {
+                "date": date_label,
+                "start_date": str(item.start_date),
+                "end_date": str(item.end_date),
+                "project": item.project,
+                "task": item.task,
+                "status": item.progress,
+                "content": f"[{item.project}] {item.task}",
+                "progress": item.progress,
+                "conclusion": item.result or item.notes or "暂无",
+                "result": item.result or "",
+                "blockers": item.blockers or "",
+                "hours": item.hours,
+                "priority": item.priority,
+                "notes": item.notes or "",
+            }
+        )
+    work_items = TemplateList(
+        work_item_rows,
+        format_logs_for_prompt(work_logs) or "- 暂无工作记录",
+    )
+    highlights = TemplateList(results, "\n".join(f"- {item}" for item in results) or "- 暂无")
+    blocker_items = TemplateList(blockers, "\n".join(f"- {item}" for item in blockers) or "- 暂无")
+    next_step_items = ["继续推进未完成事项"]
+    next_steps = TemplateList(next_step_items, "\n".join(f"- {item}" for item in next_step_items))
     return {
         "title": title,
         "report_type": report_type.value,
         "period_start": str(period[0]),
         "period_end": str(period[1]),
-        "generated_at": utcnow().isoformat(),
+        "generated_at": format_local_datetime(utcnow()),
         "ai_content": ai_content,
         "summary": ai_content,
         "work_items": work_items,
-        "highlights": "\n".join(f"- {item}" for item in results) or "- 暂无",
-        "blockers": "\n".join(f"- {item}" for item in blockers) or "- 暂无",
-        "next_steps": "- 继续推进未完成事项",
+        "highlights": highlights,
+        "blockers": blocker_items,
+        "next_steps": next_steps,
         "raw_llm_content": ai_content,
     }
 
@@ -173,10 +216,22 @@ def create_report(
         validate_template_content(template.content)
         logs = list_work_logs_for_period(db, period[0], period[1])
         client = llm_client or LLMClient()
-        result = client.generate(active_llm_setting(db), REPORT_TITLES[report_type], period, logs)
-        context = build_report_context(report_type, period, logs, result.content)
-        rendered = render_template(template.content, context)
-        title = str(context["title"])
+        setting = active_llm_setting(db)
+        if requires_llm_template_fill(template.content):
+            result = client.fill_template(
+                setting,
+                REPORT_TITLES[report_type],
+                period,
+                logs,
+                template.content,
+            )
+            rendered = result.content
+            title = f"{period[0]} 至 {period[1]} {REPORT_TITLES[report_type]}"
+        else:
+            result = client.generate(setting, REPORT_TITLES[report_type], period, logs)
+            context = build_report_context(report_type, period, logs, result.content)
+            rendered = render_template(template.content, context)
+            title = str(context["title"])
         source_log_ids = json.dumps([item.id for item in logs])
 
         if existing:

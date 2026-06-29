@@ -44,10 +44,16 @@ const reportLabels: Record<ReportType, string> = {
   performance_review: "绩效考核表"
 };
 
-const providerDefaults: Record<Provider, { base_url: string; model: string }> = {
-  openai: { base_url: "https://api.openai.com/v1", model: "gpt-4.1-mini" },
-  nvidia: { base_url: "https://integrate.api.nvidia.com/v1", model: "meta/llama-3.1-70b-instruct" },
-  openrouter: { base_url: "https://openrouter.ai/api/v1", model: "openai/gpt-4.1-mini" }
+const providerLabels: Record<Provider, string> = {
+  openai: "OpenAI",
+  nvidia: "NVIDIA",
+  openrouter: "OpenRouter"
+};
+
+const providerDefaults: Record<Provider, { base_url: string; model: string; timeout_seconds: number }> = {
+  openai: { base_url: "https://api.openai.com/v1", model: "gpt-4.1-mini", timeout_seconds: 60 },
+  nvidia: { base_url: "https://integrate.api.nvidia.com/v1", model: "meta/llama-3.1-70b-instruct", timeout_seconds: 180 },
+  openrouter: { base_url: "https://openrouter.ai/api/v1", model: "openai/gpt-4.1-mini", timeout_seconds: 60 }
 };
 
 function today() {
@@ -68,6 +74,7 @@ function App() {
   const [reports, setReports] = React.useState<Report[]>([]);
   const [templates, setTemplates] = React.useState<Template[]>([]);
   const [llmSetting, setLlmSetting] = React.useState<LlmSetting | null>(null);
+  const [llmSettings, setLlmSettings] = React.useState<LlmSetting[]>([]);
   const [emailSetting, setEmailSetting] = React.useState<EmailSetting | null>(null);
   const [recipients, setRecipients] = React.useState<Recipient[]>([]);
   const [notice, setNotice] = React.useState("");
@@ -78,11 +85,20 @@ function App() {
     setLoading(true);
     setError("");
     try {
-      const [logsPage, reportList, templateList, setting, savedEmailSetting, recipientList] = await Promise.all([
+      const [
+        logsPage,
+        reportList,
+        templateList,
+        setting,
+        savedSettings,
+        savedEmailSetting,
+        recipientList
+      ] = await Promise.all([
         api.listWorkLogs(pageOverride, pageSizeOverride),
         api.listReports(),
         api.listTemplates(),
         api.getLlmSetting(),
+        api.listLlmSettings(),
         api.getEmailSetting(),
         api.listRecipients()
       ]);
@@ -91,6 +107,7 @@ function App() {
       setReports(reportList);
       setTemplates(templateList);
       setLlmSetting(setting);
+      setLlmSettings(savedSettings);
       setEmailSetting(savedEmailSetting);
       setRecipients(recipientList);
     } catch (err) {
@@ -199,7 +216,7 @@ function App() {
               setNotice("");
               try {
                 const result = await api.importTemplateExample(payload);
-                setNotice("已根据示例生成模板草稿");
+                setNotice("已根据示例生成模板草稿，请检查并保存模板");
                 return result.content;
               } catch (err) {
                 setError(err instanceof Error ? err.message : "导入示例失败");
@@ -213,9 +230,18 @@ function App() {
         {tab === "settings" && (
           <SettingsPage
             setting={llmSetting}
+            settings={llmSettings}
             emailSetting={emailSetting}
             recipients={recipients}
-            onSave={(payload) => run(() => api.updateLlmSetting(payload).then(() => undefined), "LLM 设置已保存")}
+            onSave={(payload) => run(
+              () => (payload.id
+                ? api.updateLlmSetting(payload.id, payload)
+                : api.createLlmSetting(payload)
+              ).then(() => undefined),
+              payload.id ? "LLM 设置已更新并应用" : "LLM 新设置已保存并应用"
+            )}
+            onApplyLlmSetting={(id) => run(() => api.applyLlmSetting(id).then(() => undefined), "LLM 配置已应用")}
+            onDeleteLlmSetting={(id) => run(() => api.deleteLlmSetting(id), "LLM 配置已删除")}
             onSaveEmail={(payload) => run(() => api.updateEmailSetting(payload).then(() => undefined), "SMTP 邮箱设置已保存")}
             onTestEmail={(address) => run(() => api.testEmailSetting(address).then(() => undefined), "测试邮件已发送")}
             onCreateRecipient={(payload) => run(() => api.createRecipient(payload).then(() => undefined), "收件人已添加")}
@@ -1114,12 +1140,15 @@ function TemplatesPage(props: {
   const [showExampleImport, setShowExampleImport] = React.useState(false);
   const [exampleContent, setExampleContent] = React.useState("");
   const [isImporting, setIsImporting] = React.useState(false);
+  const [hasImportedDraft, setHasImportedDraft] = React.useState(false);
+  const contentEditorRef = React.useRef<HTMLTextAreaElement | null>(null);
 
   React.useEffect(() => {
     if (selectedId === "new") {
       setForm(emptyTemplateForm());
       setShowExampleImport(false);
       setExampleContent("");
+      setHasImportedDraft(false);
     }
   }, [emptyTemplateForm, selectedId]);
 
@@ -1131,6 +1160,7 @@ function TemplatesPage(props: {
         content: selected.content,
         is_default: selected.is_default
       });
+      setHasImportedDraft(false);
     }
   }, [selected?.id]);
 
@@ -1150,10 +1180,24 @@ function TemplatesPage(props: {
         example_content: exampleContent,
       });
       setForm((current) => ({ ...current, content }));
+      setHasImportedDraft(true);
       setShowExampleImport(false);
+      window.requestAnimationFrame(() => {
+        contentEditorRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+        contentEditorRef.current?.focus();
+      });
     } finally {
       setIsImporting(false);
     }
+  }
+
+  async function saveTemplate() {
+    if (selected) {
+      await props.onSave(selected.id, form);
+    } else {
+      await props.onCreate(form);
+    }
+    setHasImportedDraft(false);
   }
 
   async function deleteTemplate() {
@@ -1241,15 +1285,26 @@ function TemplatesPage(props: {
             )}
           </div>
         )}
+        {hasImportedDraft && (
+          <div className="draft-callout full" role="status">
+            <CheckCircle2 size={16} />
+            <span>模板草稿已填入下方“模板内容”，保存后会出现在左侧模板列表。</span>
+          </div>
+        )}
         <label className="full">
           模板内容
-          <textarea className="template-markdown-editor" value={form.content} onChange={(event) => setField("content", event.target.value)} />
+          <textarea
+            ref={contentEditorRef}
+            className="template-markdown-editor"
+            value={form.content}
+            onChange={(event) => setField("content", event.target.value)}
+          />
         </label>
         <div className="button-row">
           <button
             className="primary"
             type="button"
-            onClick={() => void (selected ? props.onSave(selected.id, form) : props.onCreate(form))}
+            onClick={() => void saveTemplate()}
           >
             <Save size={18} />
             保存模板
@@ -1268,9 +1323,12 @@ function TemplatesPage(props: {
 
 function SettingsPage(props: {
   setting: LlmSetting | null;
+  settings: LlmSetting[];
   emailSetting: EmailSetting | null;
   recipients: Recipient[];
   onSave: (payload: LlmSetting) => Promise<void>;
+  onApplyLlmSetting: (id: number) => Promise<void>;
+  onDeleteLlmSetting: (id: number) => Promise<void>;
   onSaveEmail: (payload: EmailSetting) => Promise<void>;
   onTestEmail: (address: string) => Promise<void>;
   onCreateRecipient: (payload: Pick<Recipient, "name" | "email" | "is_default">) => Promise<void>;
@@ -1282,25 +1340,72 @@ function SettingsPage(props: {
     base_url: providerDefaults.openai.base_url,
     model: providerDefaults.openai.model,
     api_key: "",
-    extra_headers: {}
+    extra_headers: {},
+    timeout_seconds: providerDefaults.openai.timeout_seconds
   });
   const [headersText, setHeadersText] = React.useState("{}");
   const [headersError, setHeadersError] = React.useState("");
+  const activeProviderLabel = props.setting ? providerLabels[props.setting.provider] : "未配置";
+  const formSetting = props.settings.find((item) => item.id === form.id);
+  const apiKeyPlaceholder = formSetting?.api_key
+    ? `当前：${formSetting.api_key}`
+    : props.setting?.api_key
+      ? `当前：${props.setting.api_key}`
+      : "";
 
   React.useEffect(() => {
     if (props.setting) {
       setForm({ ...props.setting, api_key: "" });
       setHeadersText(JSON.stringify(props.setting.extra_headers ?? {}, null, 2));
     }
-  }, [props.setting?.provider, props.setting?.base_url, props.setting?.model]);
+  }, [
+    props.setting?.id,
+    props.setting?.provider,
+    props.setting?.base_url,
+    props.setting?.model,
+    props.setting?.api_key,
+    props.setting?.timeout_seconds,
+    props.setting?.updated_at
+  ]);
+
+  function loadSavedSetting(setting: LlmSetting) {
+    setForm({ ...setting, api_key: "" });
+    setHeadersText(JSON.stringify(setting.extra_headers ?? {}, null, 2));
+    setHeadersError("");
+  }
 
   function setProvider(provider: Provider) {
+    const extra_headers: Record<string, string> = {};
     setForm((current) => ({
       ...current,
+      id: undefined,
+      is_active: undefined,
+      created_at: undefined,
+      updated_at: undefined,
       provider,
       base_url: providerDefaults[provider].base_url,
-      model: providerDefaults[provider].model
+      model: providerDefaults[provider].model,
+      api_key: "",
+      extra_headers,
+      timeout_seconds: providerDefaults[provider].timeout_seconds
     }));
+    setHeadersText(JSON.stringify(extra_headers, null, 2));
+    setHeadersError("");
+  }
+
+  function startNewSetting() {
+    const provider = props.setting?.provider ?? "openai";
+    const extra_headers: Record<string, string> = {};
+    setForm({
+      provider,
+      base_url: providerDefaults[provider].base_url,
+      model: providerDefaults[provider].model,
+      api_key: "",
+      extra_headers,
+      timeout_seconds: providerDefaults[provider].timeout_seconds
+    });
+    setHeadersText(JSON.stringify(extra_headers, null, 2));
+    setHeadersError("");
   }
 
   async function save(event: React.FormEvent<HTMLFormElement>) {
@@ -1322,78 +1427,161 @@ function SettingsPage(props: {
     await props.onSave({ ...form, extra_headers });
   }
 
+  async function removeSavedSetting(setting: LlmSetting) {
+    if (!setting.id || setting.is_active) {
+      return;
+    }
+    const label = `${providerLabels[setting.provider]} / ${setting.model}`;
+    if (!window.confirm(`删除 LLM 配置「${label}」？`)) {
+      return;
+    }
+    await props.onDeleteLlmSetting(setting.id);
+    if (form.id === setting.id && props.setting) {
+      loadSavedSetting(props.setting);
+    }
+  }
+
   return (
     <div className="settings-stack">
       <form className="panel settings-panel" onSubmit={(event) => void save(event)}>
-      <div className="settings-intro">
-        <p className="section-eyebrow">本地配置</p>
-        <h2>LLM 设置</h2>
-        <p>配置一个兼容 OpenAI API 的服务，用于生成报告和从示例提炼模板。</p>
-        <div className="settings-side-note">
-          <span>保存提示</span>
-          <strong>未填写的密钥会保留</strong>
-          <p>保存服务地址或模型时，无需再次输入当前 API Key。</p>
+        <div className="settings-intro">
+          <p className="section-eyebrow">本地配置</p>
+          <h2>LLM 设置</h2>
+          <p>配置一个兼容 OpenAI API 的服务，用于生成报告和从示例提炼模板。</p>
+          <div className="settings-side-note">
+            <span>当前应用</span>
+            <strong>{activeProviderLabel}{props.setting ? ` / ${props.setting.model}` : ""}</strong>
+            <p>保存并应用后，报告生成和模板提炼会立即使用这一组配置。各 Provider 的密钥独立保留。</p>
+          </div>
         </div>
-      </div>
 
-      <fieldset className="settings-section">
-        <legend>模型服务</legend>
-        <p>切换服务商会自动填入推荐的 Base URL 与模型名称，你仍可按实际环境调整。</p>
-        <div className="settings-grid">
-          <label>
-            Provider
-            <select value={form.provider} onChange={(event) => setProvider(event.target.value as Provider)}>
-              <option value="openai">OpenAI</option>
-              <option value="nvidia">NVIDIA</option>
-              <option value="openrouter">OpenRouter</option>
-            </select>
-          </label>
-          <label>
-            Model
-            <input value={form.model} onChange={(event) => setForm({ ...form, model: event.target.value })} />
-          </label>
-          <label className="full">
-            Base URL
-            <input value={form.base_url} onChange={(event) => setForm({ ...form, base_url: event.target.value })} />
-          </label>
+        <section className="settings-section saved-llm-section">
+          <div className="saved-llm-header">
+            <div>
+              <h3>已保存 LLM 配置</h3>
+              <p>这些配置会保留在本地；点击“应用”后，生成报告和模板会使用对应配置。</p>
+            </div>
+            <div className="saved-llm-header-actions">
+              <span className="count-badge">{props.settings.length} 个</span>
+              <button className="secondary" type="button" onClick={startNewSetting}>
+                <Plus size={16} />
+                新增配置
+              </button>
+            </div>
+          </div>
+          {props.settings.length ? (
+            <div className="saved-llm-list">
+              {props.settings.map((item) => (
+                <div className={item.is_active ? "saved-llm-item active" : "saved-llm-item"} key={item.id}>
+                  <button className="saved-llm-main" type="button" onClick={() => loadSavedSetting(item)}>
+                    <strong>{providerLabels[item.provider]} / {item.model}</strong>
+                    <span>{item.base_url}</span>
+                    <small>{item.api_key ? `Key ${item.api_key}` : "未保存 API Key"}</small>
+                    <small>请求超时 {item.timeout_seconds} 秒</small>
+                  </button>
+                  <div className="saved-llm-actions">
+                    {item.is_active && <span className="status-badge">当前应用</span>}
+                    <button className="secondary" type="button" onClick={() => loadSavedSetting(item)}>
+                      编辑
+                    </button>
+                    <button
+                      className="primary"
+                      type="button"
+                      disabled={Boolean(item.is_active) || !item.id}
+                      onClick={() => item.id && void props.onApplyLlmSetting(item.id)}
+                    >
+                      应用
+                    </button>
+                    <button
+                      className="icon-button danger"
+                      type="button"
+                      disabled={Boolean(item.is_active) || !item.id}
+                      title={item.is_active ? "当前应用的配置不能删除，请先应用其他配置" : "删除配置"}
+                      aria-label={`删除 ${providerLabels[item.provider]} ${item.model} 配置`}
+                      onClick={() => void removeSavedSetting(item)}
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="empty-hint">还没有保存过 LLM 配置。</p>
+          )}
+        </section>
+
+        <fieldset className="settings-section">
+          <legend>模型服务</legend>
+          <p>切换服务商会自动填入推荐的 Base URL 与模型名称，你仍可按实际环境调整。</p>
+          <div className="settings-grid">
+            <label>
+              Provider
+              <select value={form.provider} onChange={(event) => setProvider(event.target.value as Provider)}>
+                <option value="openai">OpenAI</option>
+                <option value="nvidia">NVIDIA</option>
+                <option value="openrouter">OpenRouter</option>
+              </select>
+            </label>
+            <label>
+              Model
+              <input value={form.model} onChange={(event) => setForm({ ...form, model: event.target.value })} />
+            </label>
+            <label className="full">
+              Base URL
+              <input value={form.base_url} onChange={(event) => setForm({ ...form, base_url: event.target.value })} />
+            </label>
+            <label>
+              请求超时（秒）
+              <input
+                type="number"
+                min={5}
+                max={600}
+                step={5}
+                required
+                value={form.timeout_seconds}
+                onChange={(event) => setForm({ ...form, timeout_seconds: Number(event.target.value) })}
+              />
+            </label>
+          </div>
+        </fieldset>
+
+        <fieldset className="settings-section">
+          <legend>认证与扩展</legend>
+          <p>API Key 仅在填写新值时更新；保留为空可继续使用当前已保存的密钥。</p>
+          <p>切换 Provider 后留空 API Key 时，只会复用该 Provider 之前保存过的密钥。</p>
+          <div className="settings-grid">
+            <label className="full">
+              API Key
+              <input
+                type="password"
+                placeholder={apiKeyPlaceholder}
+                value={form.api_key ?? ""}
+                onChange={(event) => setForm({ ...form, api_key: event.target.value })}
+              />
+            </label>
+            <label className="full">
+              Extra Headers JSON
+              <textarea
+                aria-describedby={headersError ? "headers-error" : undefined}
+                aria-invalid={Boolean(headersError)}
+                value={headersText}
+                onChange={(event) => {
+                  setHeadersText(event.target.value);
+                  setHeadersError("");
+                }}
+              />
+            </label>
+            {headersError && <p className="field-error full" id="headers-error" role="alert">{headersError}</p>}
+          </div>
+        </fieldset>
+
+        <div className="button-row settings-actions">
+          <button className="primary" type="submit">
+            <Save size={18} />
+            {form.id ? "保存并应用修改" : "保存并应用新配置"}
+          </button>
         </div>
-      </fieldset>
-
-      <fieldset className="settings-section">
-        <legend>认证与扩展</legend>
-        <p>API Key 仅在填写新值时更新；保留为空可继续使用当前已保存的密钥。</p>
-        <div className="settings-grid">
-          <label className="full">
-            API Key
-            <input
-              type="password"
-              placeholder={props.setting?.api_key ? `当前：${props.setting.api_key}` : ""}
-              value={form.api_key ?? ""}
-              onChange={(event) => setForm({ ...form, api_key: event.target.value })}
-            />
-          </label>
-          <label className="full">
-            Extra Headers JSON
-            <textarea
-              aria-describedby={headersError ? "headers-error" : undefined}
-              aria-invalid={Boolean(headersError)}
-              value={headersText}
-              onChange={(event) => {
-                setHeadersText(event.target.value);
-                setHeadersError("");
-              }}
-            />
-          </label>
-          {headersError && <p className="field-error full" id="headers-error" role="alert">{headersError}</p>}
-        </div>
-      </fieldset>
-
-      <div className="button-row settings-actions">
-        <button className="primary" type="submit">
-          <Save size={18} />
-          保存设置
-        </button>
-      </div>
       </form>
       <EmailSettingsPanel setting={props.emailSetting} onSave={props.onSaveEmail} onTest={props.onTestEmail} />
       <RecipientDirectory

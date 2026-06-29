@@ -55,6 +55,7 @@ class LLMSetting(TimestampMixin, Base):
     model: Mapped[str] = mapped_column(String(160))
     api_key: Mapped[str | None] = mapped_column(Text, default=None)
     extra_headers: Mapped[str | None] = mapped_column(Text, default=None)
+    timeout_seconds: Mapped[int] = mapped_column(Integer, default=60)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 

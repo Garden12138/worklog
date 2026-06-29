@@ -52,7 +52,7 @@ from app.schemas import (
 )
 from app.services.docx_export import markdown_to_docx
 from app.services.email import EmailDeliveryError, markdown_to_email_html, send_email
-from app.services.llm import LLMClient
+from app.services.llm import LLMClient, LLMProviderError
 from app.services.reports import create_report, report_to_dict_source_ids, seed_default_templates
 from app.services.reports import active_llm_setting
 from app.services.templates import TemplateValidationError, validate_template_content
@@ -120,6 +120,33 @@ def report_email_delivery_read(delivery: ReportEmailDelivery) -> ReportEmailDeli
 
 def active_email_setting(db: Session) -> EmailSetting | None:
     return db.scalar(select(EmailSetting).where(EmailSetting.is_active.is_(True)).order_by(EmailSetting.id.desc()))
+
+
+def llm_setting_read(item: LLMSetting) -> LLMSettingRead:
+    return LLMSettingRead(
+        id=item.id,
+        provider=item.provider,
+        base_url=item.base_url,
+        model=item.model,
+        api_key=item.api_key,
+        extra_headers=json.loads(item.extra_headers or "{}"),
+        timeout_seconds=item.timeout_seconds,
+        is_active=item.is_active,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+    )
+
+
+def latest_llm_setting_with_key(db: Session, provider: str) -> LLMSetting | None:
+    return db.scalar(
+        select(LLMSetting)
+        .where(
+            LLMSetting.provider == provider,
+            LLMSetting.api_key.is_not(None),
+            LLMSetting.api_key != "",
+        )
+        .order_by(LLMSetting.id.desc())
+    )
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -240,6 +267,8 @@ def import_template_from_example(
         validate_template_content(result.content)
     except TemplateValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except LLMProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return TemplateImportExampleResponse(
@@ -350,6 +379,8 @@ def generate_report(payload: ReportGenerateRequest, db: Session = Depends(get_db
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LLMProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     return GenerateResponse(report=report_read(report), task_id=task.id, used_llm=used_llm)
 
 
@@ -458,41 +489,94 @@ def get_llm_setting(db: Session = Depends(get_db)) -> LLMSettingRead | None:
     item = db.scalar(select(LLMSetting).where(LLMSetting.is_active.is_(True)).order_by(LLMSetting.id.desc()))
     if not item:
         return None
-    return LLMSettingRead(
-        provider=item.provider,
-        base_url=item.base_url,
-        model=item.model,
-        api_key=item.api_key,
-        extra_headers=json.loads(item.extra_headers or "{}"),
+    return llm_setting_read(item)
+
+
+@app.get("/api/settings/llm/all", response_model=list[LLMSettingRead])
+def list_llm_settings(db: Session = Depends(get_db)) -> list[LLMSettingRead]:
+    items = db.scalars(
+        select(LLMSetting).order_by(LLMSetting.is_active.desc(), LLMSetting.updated_at.desc(), LLMSetting.id.desc())
     )
+    return [llm_setting_read(item) for item in items]
+
+
+@app.post("/api/settings/llm/{setting_id}/apply", response_model=LLMSettingRead)
+def apply_llm_setting(setting_id: int, db: Session = Depends(get_db)) -> LLMSettingRead:
+    item = db.get(LLMSetting, setting_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="LLM setting not found")
+    db.query(LLMSetting).update({"is_active": False})
+    item.is_active = True
+    db.commit()
+    db.refresh(item)
+    return llm_setting_read(item)
+
+
+@app.delete("/api/settings/llm/{setting_id}", status_code=204)
+def delete_llm_setting(setting_id: int, db: Session = Depends(get_db)) -> None:
+    item = db.get(LLMSetting, setting_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="LLM setting not found")
+    if item.is_active:
+        raise HTTPException(status_code=409, detail="当前应用的 LLM 配置不能删除，请先应用其他配置")
+    db.delete(item)
+    db.commit()
+
+
+@app.put("/api/settings/llm/{setting_id}", response_model=LLMSettingRead)
+def update_llm_setting(
+    setting_id: int,
+    payload: LLMSettingUpdate,
+    db: Session = Depends(get_db),
+) -> LLMSettingRead:
+    item = db.get(LLMSetting, setting_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="LLM setting not found")
+
+    provider = payload.provider.value
+    provided_key = payload.api_key.strip() if payload.api_key else ""
+    if provided_key:
+        api_key = provided_key
+    elif item.provider == provider and item.api_key:
+        api_key = item.api_key
+    else:
+        previous_for_provider = latest_llm_setting_with_key(db, provider)
+        api_key = previous_for_provider.api_key if previous_for_provider else None
+
+    db.query(LLMSetting).update({"is_active": False})
+    item.provider = provider
+    item.base_url = payload.resolved_base_url()
+    item.model = payload.model
+    item.api_key = api_key
+    item.extra_headers = json.dumps(payload.extra_headers)
+    item.timeout_seconds = payload.timeout_seconds
+    item.is_active = True
+    db.commit()
+    db.refresh(item)
+    return llm_setting_read(item)
 
 
 @app.put("/api/settings/llm", response_model=LLMSettingRead)
-def update_llm_setting(payload: LLMSettingUpdate, db: Session = Depends(get_db)) -> LLMSettingRead:
-    previous = db.scalar(
-        select(LLMSetting).where(LLMSetting.is_active.is_(True)).order_by(LLMSetting.id.desc())
-    )
+def create_llm_setting(payload: LLMSettingUpdate, db: Session = Depends(get_db)) -> LLMSettingRead:
+    provider = payload.provider.value
+    previous_for_provider = latest_llm_setting_with_key(db, provider)
     db.query(LLMSetting).update({"is_active": False})
     base_url = payload.resolved_base_url()
-    api_key = payload.api_key if payload.api_key else previous.api_key if previous else None
+    provided_key = payload.api_key.strip() if payload.api_key else ""
+    api_key = provided_key or (previous_for_provider.api_key if previous_for_provider else None)
     item = LLMSetting(
-        provider=payload.provider.value,
+        provider=provider,
         base_url=base_url,
         model=payload.model,
         api_key=api_key,
         extra_headers=json.dumps(payload.extra_headers),
+        timeout_seconds=payload.timeout_seconds,
         is_active=True,
     )
     db.add(item)
     db.commit()
     db.refresh(item)
-    return LLMSettingRead(
-        provider=item.provider,
-        base_url=item.base_url,
-        model=item.model,
-        api_key=item.api_key,
-        extra_headers=json.loads(item.extra_headers or "{}"),
-    )
+    return llm_setting_read(item)
 
 
 @app.get("/api/settings/email", response_model=EmailSettingRead | None)

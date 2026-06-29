@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from app.config import settings
@@ -7,6 +7,12 @@ from app.constants import ReportType
 
 def app_timezone() -> ZoneInfo:
     return ZoneInfo(settings.timezone)
+
+
+def format_local_datetime(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(app_timezone()).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def week_period(anchor: date) -> tuple[date, date]:

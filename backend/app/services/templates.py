@@ -1,4 +1,6 @@
-from jinja2 import Environment, StrictUndefined, meta
+import re
+
+from jinja2 import Environment, StrictUndefined, TemplateError, meta
 
 ALLOWED_TEMPLATE_VARIABLES = {
     "title",
@@ -40,6 +42,16 @@ def validate_template_content(content: str) -> None:
         )
 
 
+def requires_llm_template_fill(content: str) -> bool:
+    parsed = jinja_env().parse(content)
+    if meta.find_undeclared_variables(parsed):
+        return False
+    return bool(re.search(r"【(?:填写|说明)[^】]*】|_{3,}", content))
+
+
 def render_template(content: str, context: dict[str, object]) -> str:
     validate_template_content(content)
-    return jinja_env().from_string(content).render(**context)
+    try:
+        return jinja_env().from_string(content).render(**context)
+    except TemplateError as exc:
+        raise TemplateValidationError(f"Template render error: {exc}") from exc

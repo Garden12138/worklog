@@ -1,6 +1,16 @@
 from datetime import date
 
-from app.services.llm import build_chat_payload
+import pytest
+
+from app.models import LLMSetting, WorkLog
+from app.services.llm import (
+    LLMClient,
+    LLMProviderError,
+    _extract_chat_content,
+    _prepare_provider_payload,
+    _provider_timeout,
+    build_chat_payload,
+)
 
 
 def test_build_chat_payload_is_openai_compatible():
@@ -14,3 +24,66 @@ def test_build_chat_payload_is_openai_compatible():
     assert payload["messages"][0]["role"] == "system"
     assert payload["messages"][1]["role"] == "user"
     assert "2026-06-22" in payload["messages"][1]["content"]
+
+
+def test_extract_chat_content_reports_provider_error_without_choices():
+    data = {"error": {"message": "Model does not exist"}}
+
+    with pytest.raises(LLMProviderError, match="Model does not exist"):
+        _extract_chat_content(data)
+
+
+def test_nvidia_deepseek_uses_non_thinking_payload_and_longer_timeout():
+    setting = LLMSetting(
+        provider="nvidia",
+        base_url="https://integrate.api.nvidia.com/v1",
+        model="deepseek-ai/deepseek-v4-pro",
+        api_key="nvapi-test",
+        timeout_seconds=240,
+    )
+
+    payload = _prepare_provider_payload(setting, {"model": setting.model, "messages": [], "temperature": 0.2})
+
+    assert payload["temperature"] == 1
+    assert payload["top_p"] == 0.95
+    assert payload["chat_template_kwargs"] == {"thinking": False}
+    assert _provider_timeout(setting) == 240
+
+
+def test_fill_template_requests_completed_markdown(monkeypatch):
+    setting = LLMSetting(
+        provider="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        model="test-model",
+        api_key="sk-test",
+        timeout_seconds=60,
+    )
+    log = WorkLog(
+        work_date=date(2026, 6, 25),
+        start_date=date(2026, 6, 25),
+        end_date=date(2026, 6, 25),
+        project="Worklog",
+        task="生成绩效草稿",
+        progress="已完成",
+        priority="high",
+    )
+    captured: dict = {}
+
+    def fake_chat(self, current_setting, payload):
+        captured.update(payload)
+        return "```markdown\n| 指标名称 | 权重 |\n| --- | --- |\n| 生成绩效草稿 | 待确认 |\n```"
+
+    monkeypatch.setattr("app.services.llm.LLMClient._chat_completion", fake_chat)
+
+    result = LLMClient().fill_template(
+        setting,
+        "绩效考核表",
+        (date(2026, 6, 1), date(2026, 6, 30)),
+        [log],
+        "| 指标名称 | 权重 |\n| --- | --- |\n| 【填写核心任务】 | ____ |",
+    )
+
+    assert result.used_llm is True
+    assert result.content.startswith("| 指标名称 | 权重 |")
+    assert "生成绩效草稿" in captured["messages"][1]["content"]
+    assert "【填写核心任务】" in captured["messages"][1]["content"]

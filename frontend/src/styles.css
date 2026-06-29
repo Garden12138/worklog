@@ -1386,6 +1386,23 @@ textarea {
   justify-self: start;
 }
 
+.draft-callout {
+  align-items: center;
+  background: var(--success-soft);
+  border: 1px solid #bde5cf;
+  border-radius: var(--radius-sm);
+  color: var(--success);
+  display: flex;
+  font-size: 13px;
+  font-weight: 650;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.draft-callout svg {
+  flex: 0 0 auto;
+}
+
 .toggle {
   align-items: center;
   background: var(--surface-subtle);
@@ -1485,6 +1502,99 @@ textarea {
 
 .settings-grid .full {
   grid-column: 1 / -1;
+}
+
+.saved-llm-section {
+  display: grid;
+  gap: 13px;
+}
+
+.saved-llm-header {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.saved-llm-header-actions {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.saved-llm-header-actions .secondary {
+  min-height: 34px;
+  padding: 0 11px;
+}
+
+.saved-llm-header h3 {
+  color: var(--ink-secondary);
+  font-size: 15px;
+  font-weight: 740;
+  margin: 0 0 4px;
+}
+
+.saved-llm-header p,
+.empty-hint {
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 1.55;
+  margin: 0;
+}
+
+.saved-llm-list {
+  display: grid;
+  gap: 10px;
+}
+
+.saved-llm-item {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: var(--radius-sm);
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 12px;
+}
+
+.saved-llm-item.active {
+  background: #f7faff;
+  border-color: #c9daff;
+}
+
+.saved-llm-main {
+  background: transparent;
+  border: 0;
+  color: var(--ink-muted);
+  cursor: pointer;
+  display: grid;
+  font-size: 12px;
+  gap: 4px;
+  min-width: 0;
+  padding: 0;
+  text-align: left;
+}
+
+.saved-llm-main strong {
+  color: var(--ink-secondary);
+  font-size: 14px;
+  font-weight: 730;
+  overflow-wrap: anywhere;
+}
+
+.saved-llm-main span,
+.saved-llm-main small {
+  overflow-wrap: anywhere;
+}
+
+.saved-llm-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
 }
 
 .field-error {
