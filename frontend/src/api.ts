@@ -6,6 +6,7 @@ import type {
   Recipient,
   Report,
   ReportEmailDelivery,
+  ReportOptimizeResponse,
   ReportSchedule,
   ReportType,
   Template,
@@ -69,6 +70,11 @@ export const api = {
   listReports: () => request<Report[]>("/api/reports"),
   updateReport: (id: number, payload: Partial<Report>) =>
     request<Report>(`/api/reports/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+  optimizeReport: (id: number, payload: { content: string; optimization_request: string }) =>
+    request<ReportOptimizeResponse>(`/api/reports/${id}/optimize`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
   deleteReport: (id: number) => request<void>(`/api/reports/${id}`, { method: "DELETE" }),
   generateReport: (payload: {
     report_type: ReportType;

@@ -52,6 +52,12 @@ export interface TemplateOptimizeResponse {
   used_llm: boolean;
 }
 
+export interface ReportOptimizeResponse {
+  report_id: number;
+  content: string;
+  used_llm: boolean;
+}
+
 export interface Report {
   id: number;
   report_type: ReportType;

@@ -46,6 +46,8 @@ from app.schemas import (
     ReportEmailDeliveryRead,
     ReportEmailSendRequest,
     ReportGenerateRequest,
+    ReportOptimizeRequest,
+    ReportOptimizeResponse,
     ReportRead,
     ReportScheduleRead,
     ReportScheduleUpdate,
@@ -71,8 +73,13 @@ from app.services.email import (
     send_email,
 )
 from app.services.llm import LLMClient, LLMProviderError
-from app.services.reports import create_report, report_to_dict_source_ids, seed_default_templates
-from app.services.reports import active_llm_setting
+from app.services.reports import (
+    REPORT_TITLES,
+    active_llm_setting,
+    create_report,
+    report_to_dict_source_ids,
+    seed_default_templates,
+)
 from app.services.templates import TemplateValidationError, validate_template_content
 
 
@@ -433,6 +440,35 @@ def update_report(report_id: int, payload: ReportUpdate, db: Session = Depends(g
     db.commit()
     db.refresh(item)
     return report_read(item)
+
+
+@app.post("/api/reports/{report_id}/optimize", response_model=ReportOptimizeResponse)
+def optimize_report(
+    report_id: int,
+    payload: ReportOptimizeRequest,
+    db: Session = Depends(get_db),
+) -> ReportOptimizeResponse:
+    item = db.get(Report, report_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Report not found")
+    try:
+        report_type = ReportType(item.report_type)
+        result = LLMClient().optimize_report(
+            active_llm_setting(db),
+            REPORT_TITLES[report_type],
+            (item.period_start, item.period_end),
+            payload.content,
+            payload.optimization_request,
+        )
+    except LLMProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ReportOptimizeResponse(
+        report_id=item.id,
+        content=result.content,
+        used_llm=result.used_llm,
+    )
 
 
 @app.delete("/api/reports/{report_id}", status_code=204)

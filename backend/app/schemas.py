@@ -396,6 +396,25 @@ class ReportUpdate(BaseModel):
     content_markdown: str | None = Field(default=None, min_length=1)
 
 
+class ReportOptimizeRequest(BaseModel):
+    content: str = Field(min_length=1)
+    optimization_request: str = Field(min_length=2, max_length=1000)
+
+    @field_validator("content", "optimization_request")
+    @classmethod
+    def require_non_whitespace_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("a non-empty value is required")
+        return normalized
+
+
+class ReportOptimizeResponse(BaseModel):
+    report_id: int
+    content: str
+    used_llm: bool = True
+
+
 class ReportGenerateRequest(BaseModel):
     report_type: ReportType
     anchor_date: date | None = None

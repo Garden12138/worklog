@@ -878,7 +878,7 @@ textarea {
   border-bottom: 1px solid var(--border);
   display: grid;
   gap: 9px;
-  grid-template-columns: minmax(0, 1fr) auto auto auto auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto auto auto auto;
   padding: 11px;
   z-index: 1;
 }
@@ -886,6 +886,27 @@ textarea {
 .editor-toolbar input {
   font-weight: 650;
   min-width: 0;
+}
+
+.report-optimize-trigger {
+  height: 40px;
+  padding-left: 11px;
+  padding-right: 11px;
+  white-space: nowrap;
+}
+
+.report-optimize-dialog {
+  max-width: 620px;
+}
+
+.report-optimize-dialog textarea {
+  min-height: 128px;
+}
+
+.report-optimize-hint {
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .settings-stack {
@@ -2300,7 +2321,7 @@ textarea {
   }
 
   .editor-toolbar {
-    grid-template-columns: repeat(5, auto);
+    grid-template-columns: repeat(6, auto);
   }
 
   .editor-toolbar > input {
@@ -2361,6 +2382,31 @@ textarea {
 }
 
 @media (max-width: 540px) {
+  .editor-toolbar {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .editor-toolbar .mode-switch {
+    display: flex;
+    grid-column: span 2;
+  }
+
+  .editor-toolbar .mode-switch button {
+    flex: 1 1 0;
+    justify-content: center;
+  }
+
+  .editor-toolbar .report-optimize-trigger {
+    grid-column: span 2;
+    justify-content: center;
+    width: 100%;
+  }
+
+  .editor-toolbar > .icon-button,
+  .editor-toolbar > a.icon-button {
+    justify-self: center;
+  }
+
   .brand span {
     display: none;
   }

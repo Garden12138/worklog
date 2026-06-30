@@ -505,6 +505,56 @@ def test_optimize_template_rejects_invalid_llm_result(client, monkeypatch):
     assert "unsupported" in response.json()["detail"]
 
 
+def test_optimize_report_returns_candidate_without_overwriting_draft(client, monkeypatch):
+    generated = client.post(
+        "/api/reports/generate",
+        json={"report_type": "weekly_report", "anchor_date": "2026-06-23"},
+    ).json()["report"]
+    original_saved_content = generated["content_markdown"]
+    current_editor_content = "# 周报\n\n- 完成接口联调\n- 完成接口联调"
+
+    client.put(
+        "/api/settings/llm",
+        json={
+            "provider": "openai",
+            "base_url": "https://example.test/v1",
+            "model": "report-model",
+            "api_key": "sk-report-secret",
+            "extra_headers": {},
+        },
+    )
+
+    def fake_optimize_report(
+        self, setting, report_kind, period, report_content, optimization_request
+    ):
+        assert setting.api_key == "sk-report-secret"
+        assert report_kind == "周报"
+        assert period == (date(2026, 6, 22), date(2026, 6, 28))
+        assert report_content == current_editor_content
+        assert optimization_request == "去除重复内容，突出关键成果"
+        return LLMResult(
+            content="# 周报\n\n## 关键成果\n\n- 完成接口联调",
+            used_llm=True,
+        )
+
+    monkeypatch.setattr("app.main.LLMClient.optimize_report", fake_optimize_report)
+    response = client.post(
+        f"/api/reports/{generated['id']}/optimize",
+        json={
+            "content": current_editor_content,
+            "optimization_request": "去除重复内容，突出关键成果",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "report_id": generated["id"],
+        "content": "# 周报\n\n## 关键成果\n\n- 完成接口联调",
+        "used_llm": True,
+    }
+    assert client.get(f"/api/reports/{generated['id']}").json()["content_markdown"] == original_saved_content
+
+
 def test_generate_performance_report_fills_placeholder_template(client, monkeypatch):
     client.put(
         "/api/settings/llm",

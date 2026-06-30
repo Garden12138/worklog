@@ -207,6 +207,17 @@ function App() {
             templates={templates}
             recipients={recipients}
             onGenerate={(payload) => run(() => api.generateReport(payload).then(() => undefined), "报告草稿已生成")}
+            onOptimize={async (id, payload) => {
+              setError("");
+              setNotice("");
+              try {
+                const result = await api.optimizeReport(id, payload);
+                return result.content;
+              } catch (err) {
+                setError(err instanceof Error ? err.message : "优化报告草稿失败");
+                throw err;
+              }
+            }}
             onSave={(id, payload) => run(() => api.updateReport(id, payload).then(() => undefined), "报告草稿已保存到本地数据库")}
             onDelete={(id) => run(() => api.deleteReport(id), "报告草稿已删除")}
             onSendEmail={(id, payload) => run(() => api.sendReportEmail(id, payload).then(() => undefined), "报告邮件已发送")}
@@ -556,6 +567,10 @@ function ReportsPage(props: {
     template_id?: number;
     overwrite?: boolean;
   }) => Promise<void>;
+  onOptimize: (
+    id: number,
+    payload: { content: string; optimization_request: string }
+  ) => Promise<string>;
   onSave: (id: number, payload: Partial<Report>) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
   onSendEmail: (id: number, payload: { recipient_ids: number[]; additional_recipients: string[]; subject: string }) => Promise<void>;
@@ -570,6 +585,13 @@ function ReportsPage(props: {
   const [draftTitle, setDraftTitle] = React.useState("");
   const [viewMode, setViewMode] = React.useState<"edit" | "preview">("edit");
   const [isGenerating, setIsGenerating] = React.useState(false);
+  const [showOptimizationDialog, setShowOptimizationDialog] = React.useState(false);
+  const [optimizationRequest, setOptimizationRequest] = React.useState("");
+  const [isOptimizing, setIsOptimizing] = React.useState(false);
+  const [optimizationComparison, setOptimizationComparison] = React.useState<{
+    original: string;
+    optimized: string;
+  } | null>(null);
   const [showEmailDialog, setShowEmailDialog] = React.useState(false);
   const [emailSubject, setEmailSubject] = React.useState("");
   const [selectedRecipientIds, setSelectedRecipientIds] = React.useState<number[]>([]);
@@ -582,6 +604,9 @@ function ReportsPage(props: {
   React.useEffect(() => {
     setDraft(selected?.content_markdown ?? "");
     setDraftTitle(selected?.title ?? "");
+    setShowOptimizationDialog(false);
+    setOptimizationRequest("");
+    setOptimizationComparison(null);
   }, [selected?.id]);
 
   async function generateDraft() {
@@ -613,6 +638,42 @@ function ReportsPage(props: {
     }
     await props.onDelete(selected.id);
     setSelectedId(null);
+  }
+
+  async function optimizeDraft() {
+    if (!selected || isOptimizing) {
+      return;
+    }
+    const request = optimizationRequest.trim();
+    if (!draft.trim()) {
+      window.alert("请先填写需要优化的草稿内容。");
+      return;
+    }
+    if (request.length < 2) {
+      window.alert("请先填写具体的优化需求。");
+      return;
+    }
+    setIsOptimizing(true);
+    try {
+      const original = draft;
+      const optimized = await props.onOptimize(selected.id, {
+        content: original,
+        optimization_request: request,
+      });
+      setOptimizationComparison({ original, optimized });
+      setShowOptimizationDialog(false);
+    } finally {
+      setIsOptimizing(false);
+    }
+  }
+
+  function applyOptimizedDraft() {
+    if (!optimizationComparison) {
+      return;
+    }
+    setDraft(optimizationComparison.optimized);
+    setOptimizationComparison(null);
+    setViewMode("edit");
   }
 
   async function openEmailDialog() {
@@ -785,6 +846,16 @@ function ReportsPage(props: {
                   预览
                 </button>
               </div>
+              <button
+                className="secondary report-optimize-trigger"
+                type="button"
+                title="AI 优化当前草稿"
+                disabled={isOptimizing || !draft.trim()}
+                onClick={() => setShowOptimizationDialog(true)}
+              >
+                <Sparkles size={16} />
+                AI 优化
+              </button>
               <a className="icon-button" title="导出 DOCX" aria-label="导出 DOCX" href={docxUrl(selected.id)}>
                 <Download size={18} />
               </a>
@@ -836,6 +907,82 @@ function ReportsPage(props: {
           </section>
         )}
       </div>
+      {showOptimizationDialog && selected && (
+        <section
+          className="email-dialog-backdrop"
+          role="presentation"
+          onMouseDown={() => !isOptimizing && setShowOptimizationDialog(false)}
+        >
+          <div
+            className="email-dialog report-optimize-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="report-optimize-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="dialog-heading">
+              <div>
+                <p className="section-eyebrow">AI 报告助手</p>
+                <h2 id="report-optimize-title">优化当前草稿</h2>
+                <p>描述想要的调整，AI 将生成候选版本供你对比确认。</p>
+              </div>
+              <button
+                className="icon-button"
+                type="button"
+                aria-label="关闭优化窗口"
+                disabled={isOptimizing}
+                onClick={() => setShowOptimizationDialog(false)}
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <label htmlFor="report-optimization-request">
+              优化需求
+              <textarea
+                id="report-optimization-request"
+                autoFocus
+                value={optimizationRequest}
+                disabled={isOptimizing}
+                maxLength={1000}
+                placeholder="例如：精简重复表述，突出关键成果，并让下阶段计划更清晰。"
+                onChange={(event) => setOptimizationRequest(event.target.value)}
+              />
+            </label>
+            <small className="report-optimize-hint">AI 只会基于当前草稿调整结构与表达，不会直接覆盖或保存内容。</small>
+            <div className="dialog-actions">
+              <button
+                className="secondary"
+                type="button"
+                disabled={isOptimizing}
+                onClick={() => setShowOptimizationDialog(false)}
+              >
+                取消
+              </button>
+              <button
+                className="primary"
+                type="button"
+                disabled={isOptimizing || optimizationRequest.trim().length < 2}
+                onClick={() => void optimizeDraft()}
+              >
+                {isOptimizing ? <LoaderCircle className="spin" size={17} /> : <Sparkles size={17} />}
+                {isOptimizing ? "优化中" : "生成优化版本"}
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
+      {optimizationComparison && (
+        <OptimizationDiffDialog
+          comparison={optimizationComparison}
+          eyebrow="AI 优化结果"
+          title="对比草稿修改"
+          originalLabel="当前草稿"
+          optimizedLabel="优化后"
+          applyNote="应用后仅替换当前编辑内容，仍需点击保存按钮才会写入数据库。"
+          onDiscard={() => setOptimizationComparison(null)}
+          onApply={applyOptimizedDraft}
+        />
+      )}
       {showEmailDialog && selected && (
         <section className="email-dialog-backdrop" role="presentation" onMouseDown={() => !isSendingEmail && setShowEmailDialog(false)}>
           <div
@@ -1256,6 +1403,79 @@ function buildTemplateDiff(original: string, optimized: string): TemplateDiffRow
   }
 
   return rows.reverse();
+}
+
+function OptimizationDiffDialog(props: {
+  comparison: { original: string; optimized: string };
+  eyebrow: string;
+  title: string;
+  originalLabel: string;
+  optimizedLabel: string;
+  applyNote: string;
+  onDiscard: () => void;
+  onApply: () => void;
+}) {
+  const rows = React.useMemo(
+    () => buildTemplateDiff(props.comparison.original, props.comparison.optimized),
+    [props.comparison]
+  );
+
+  return (
+    <section className="template-diff-backdrop" role="presentation">
+      <div
+        className="template-diff-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="optimization-diff-title"
+      >
+        <div className="dialog-heading">
+          <div>
+            <p className="section-eyebrow">{props.eyebrow}</p>
+            <h2 id="optimization-diff-title">{props.title}</h2>
+            <p>红色为原内容中删除的行，绿色为优化版本新增的行。</p>
+          </div>
+        </div>
+        <div className="template-diff-summary" aria-label="差异统计">
+          <span className="removed">
+            删除 {rows.filter((row) => row.kind === "removed").length} 行
+          </span>
+          <span className="added">
+            新增 {rows.filter((row) => row.kind === "added").length} 行
+          </span>
+        </div>
+        <div className="template-diff-view">
+          <div className="template-diff-column-heading">{props.originalLabel}</div>
+          <div className="template-diff-column-heading optimized">{props.optimizedLabel}</div>
+          <div className="template-diff-rows">
+            {rows.map((row, index) => (
+              <div className={`template-diff-row ${row.kind}`} key={`${row.kind}-${index}`}>
+                <div className="template-diff-cell old">
+                  <span className="template-diff-line-number">{row.oldLineNumber ?? ""}</span>
+                  <pre>{row.oldText ?? " "}</pre>
+                </div>
+                <div className="template-diff-cell new">
+                  <span className="template-diff-line-number">{row.newLineNumber ?? ""}</span>
+                  <pre>{row.newText ?? " "}</pre>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="template-diff-actions">
+          <p>{props.applyNote}</p>
+          <div>
+            <button className="secondary" type="button" onClick={props.onDiscard}>
+              不应用
+            </button>
+            <button className="primary" type="button" onClick={props.onApply}>
+              <CheckCircle2 size={17} />
+              应用优化
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
 }
 
 function TemplatesPage(props: {

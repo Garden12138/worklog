@@ -120,3 +120,36 @@ def test_optimize_template_preserves_template_constraints(monkeypatch):
     assert "以用户优化需求为修改目标" in prompt
     assert "--- REQUEST START ---" in prompt
     assert "--- TEMPLATE START ---" in prompt
+
+
+def test_optimize_report_uses_current_markdown_and_forbids_invented_facts(monkeypatch):
+    setting = LLMSetting(
+        provider="openai",
+        base_url="https://api.openai.com/v1",
+        model="test-model",
+        api_key="sk-test",
+        timeout_seconds=60,
+    )
+    captured: dict = {}
+
+    def fake_chat(self, current_setting, payload):
+        captured.update(payload)
+        return "```markdown\n# 周报\n\n## 关键成果\n\n- 完成接口联调\n```"
+
+    monkeypatch.setattr("app.services.llm.LLMClient._chat_completion", fake_chat)
+
+    result = LLMClient().optimize_report(
+        setting,
+        report_kind="周报",
+        period=(date(2026, 6, 22), date(2026, 6, 28)),
+        report_content="# 周报\n\n- 完成接口联调",
+        optimization_request="突出关键成果并精简表达",
+    )
+
+    assert result.used_llm is True
+    assert result.content.startswith("# 周报")
+    prompt = captured["messages"][1]["content"]
+    assert "突出关键成果并精简表达" in prompt
+    assert "不要添加草稿中没有的" in prompt
+    assert "--- REPORT START ---" in prompt
+    assert "完成接口联调" in prompt
