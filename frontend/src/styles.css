@@ -917,6 +917,13 @@ textarea {
   max-width: 1760px;
 }
 
+.desktop-settings-panel .path-value {
+  display: block;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.78rem;
+}
+
 .smtp-test-section {
   margin-top: 18px;
 }

@@ -21,10 +21,12 @@ import {
   X
 } from "lucide-react";
 
-import { api, docxUrl } from "./api";
+import { api } from "./api";
 import type {
+  DesktopPreferences,
   EmailSetting,
   LlmSetting,
+  MigrationResult,
   Priority,
   Provider,
   Recipient,
@@ -80,6 +82,8 @@ function App() {
   const [emailSetting, setEmailSetting] = React.useState<EmailSetting | null>(null);
   const [recipients, setRecipients] = React.useState<Recipient[]>([]);
   const [reportSchedules, setReportSchedules] = React.useState<ReportSchedule[]>([]);
+  const [desktopPreferences, setDesktopPreferences] = React.useState<DesktopPreferences | null>(null);
+  const [migrationResult, setMigrationResult] = React.useState<MigrationResult | null>(null);
   const [notice, setNotice] = React.useState("");
   const [error, setError] = React.useState("");
   const [loading, setLoading] = React.useState(true);
@@ -96,7 +100,9 @@ function App() {
         savedSettings,
         savedEmailSetting,
         recipientList,
-        scheduleList
+        scheduleList,
+        desktop,
+        migration
       ] = await Promise.all([
         api.listWorkLogs(pageOverride, pageSizeOverride),
         api.listReports(),
@@ -105,7 +111,9 @@ function App() {
         api.listLlmSettings(),
         api.getEmailSetting(),
         api.listRecipients(),
-        api.listReportSchedules()
+        api.listReportSchedules(),
+        api.getDesktopPreferences(),
+        api.getStartupMigration()
       ]);
       setWorkLogs(logsPage.items);
       setWorkLogMeta(logsPage);
@@ -116,6 +124,8 @@ function App() {
       setEmailSetting(savedEmailSetting);
       setRecipients(recipientList);
       setReportSchedules(scheduleList);
+      setDesktopPreferences(desktop);
+      setMigrationResult(migration);
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载失败");
     } finally {
@@ -220,6 +230,13 @@ function App() {
             }}
             onSave={(id, payload) => run(() => api.updateReport(id, payload).then(() => undefined), "报告草稿已保存到本地数据库")}
             onDelete={(id) => run(() => api.deleteReport(id), "报告草稿已删除")}
+            onExport={async (id) => {
+              setError("");
+              const exported = await api.exportReportDocx(id);
+              if (exported) {
+                setNotice(`DOCX 已保存到 ${exported}`);
+              }
+            }}
             onSendEmail={(id, payload) => run(() => api.sendReportEmail(id, payload).then(() => undefined), "报告邮件已发送")}
             onListEmailDeliveries={(id) => api.listReportEmailDeliveries(id)}
           />
@@ -263,6 +280,8 @@ function App() {
             emailSetting={emailSetting}
             recipients={recipients}
             reportSchedules={reportSchedules}
+            desktopPreferences={desktopPreferences}
+            migrationResult={migrationResult}
             onSave={(payload) => run(
               () => (payload.id
                 ? api.updateLlmSetting(payload.id, payload)
@@ -281,6 +300,19 @@ function App() {
             onCreateRecipient={(payload) => run(() => api.createRecipient(payload).then(() => undefined), "收件人已添加")}
             onUpdateRecipient={(id, payload) => run(() => api.updateRecipient(id, payload).then(() => undefined), "收件人已更新")}
             onDeleteRecipient={(id) => run(() => api.deleteRecipient(id), "收件人已删除")}
+            onSetLaunchAtLogin={async (enabled) => {
+              const next = await api.setLaunchAtLogin(enabled);
+              setDesktopPreferences(next);
+              setNotice(enabled ? "已启用开机启动" : "已关闭开机启动");
+            }}
+            onImportLegacy={async () => {
+              const result = await api.importLegacyDatabase();
+              if (result) {
+                setMigrationResult(result);
+                setNotice("旧版数据库导入完成");
+                await refresh();
+              }
+            }}
           />
         )}
       </section>
@@ -573,6 +605,7 @@ function ReportsPage(props: {
   ) => Promise<string>;
   onSave: (id: number, payload: Partial<Report>) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
+  onExport: (id: number) => Promise<void>;
   onSendEmail: (id: number, payload: { recipient_ids: number[]; additional_recipients: string[]; subject: string }) => Promise<void>;
   onListEmailDeliveries: (id: number) => Promise<ReportEmailDelivery[]>;
 }) {
@@ -856,9 +889,9 @@ function ReportsPage(props: {
                 <Sparkles size={16} />
                 AI 优化
               </button>
-              <a className="icon-button" title="导出 DOCX" aria-label="导出 DOCX" href={docxUrl(selected.id)}>
+              <button className="icon-button" type="button" title="导出 DOCX" aria-label="导出 DOCX" onClick={() => void props.onExport(selected.id)}>
                 <Download size={18} />
-              </a>
+              </button>
               <button
                 className="icon-button"
                 type="button"
@@ -1852,6 +1885,8 @@ function SettingsPage(props: {
   emailSetting: EmailSetting | null;
   recipients: Recipient[];
   reportSchedules: ReportSchedule[];
+  desktopPreferences: DesktopPreferences | null;
+  migrationResult: MigrationResult | null;
   onSave: (payload: LlmSetting) => Promise<void>;
   onApplyLlmSetting: (id: number) => Promise<void>;
   onDeleteLlmSetting: (id: number) => Promise<void>;
@@ -1864,6 +1899,8 @@ function SettingsPage(props: {
   onCreateRecipient: (payload: Pick<Recipient, "name" | "email" | "is_default">) => Promise<void>;
   onUpdateRecipient: (id: number, payload: Partial<Pick<Recipient, "name" | "email" | "is_default">>) => Promise<void>;
   onDeleteRecipient: (id: number) => Promise<void>;
+  onSetLaunchAtLogin: (enabled: boolean) => Promise<void>;
+  onImportLegacy: () => Promise<void>;
 }) {
   const [form, setForm] = React.useState<LlmSetting>({
     provider: "openai",
@@ -1973,6 +2010,33 @@ function SettingsPage(props: {
 
   return (
     <div className="settings-stack">
+      <section className="panel settings-panel desktop-settings-panel">
+        <div className="settings-intro">
+          <p className="section-eyebrow">桌面应用</p>
+          <h2>本地运行</h2>
+          <p>关闭主窗口后 Worklog 会留在系统托盘，定时报告仍会继续执行。</p>
+          <div className="settings-side-note">
+            <span>数据库位置</span>
+            <strong className="path-value">{props.desktopPreferences?.database_path ?? "正在读取"}</strong>
+            <p>{props.migrationResult?.imported ? `已从 ${props.migrationResult.source_path ?? "旧版本"} 自动迁移` : "数据保存在操作系统应用数据目录。"}</p>
+          </div>
+        </div>
+        <div className="settings-section">
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={Boolean(props.desktopPreferences?.launch_at_login)}
+              onChange={(event) => void props.onSetLaunchAtLogin(event.target.checked)}
+            />
+            登录电脑后自动启动 Worklog
+          </label>
+          <p className="form-hint">未自动发现旧版数据时，可手动选择原来的 worklog.db；已有新数据后将禁止覆盖导入。</p>
+          <button className="secondary" type="button" onClick={() => void props.onImportLegacy()}>
+            <Download size={16} />
+            导入旧版数据库
+          </button>
+        </div>
+      </section>
       <form className="panel settings-panel" onSubmit={(event) => void save(event)}>
         <div className="settings-intro">
           <p className="section-eyebrow">本地配置</p>

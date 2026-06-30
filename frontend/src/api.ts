@@ -1,7 +1,12 @@
+import { invoke } from "@tauri-apps/api/core";
+import { open, save } from "@tauri-apps/plugin-dialog";
+
 import type {
+  DesktopPreferences,
   EmailSetting,
   GenerateResponse,
   LlmSetting,
+  MigrationResult,
   PaginatedWorkLogs,
   Recipient,
   Report,
@@ -15,67 +20,51 @@ import type {
   WorkLog
 } from "./types";
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? "";
+function asError(error: unknown): Error {
+  if (error instanceof Error) {
+    return error;
+  }
+  if (typeof error === "object" && error && "message" in error) {
+    return new Error(String((error as { message: unknown }).message));
+  }
+  return new Error(typeof error === "string" ? error : JSON.stringify(error));
+}
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers ?? {})
-    }
-  });
-  if (!response.ok) {
-    let message = response.statusText;
-    try {
-      const data = await response.json();
-      message = data.detail ?? message;
-    } catch {
-      // Response is not JSON; keep status text.
-    }
-    throw new Error(typeof message === "string" ? message : JSON.stringify(message));
+async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  try {
+    return await invoke<T>(command, args);
+  } catch (error) {
+    throw asError(error);
   }
-  if (response.status === 204) {
-    return undefined as T;
-  }
-  return response.json() as Promise<T>;
 }
 
 export const api = {
-  listWorkLogs: (page = 1, pageSize = 10) => request<PaginatedWorkLogs>(`/api/work-logs?page=${page}&page_size=${pageSize}`),
+  listWorkLogs: (page = 1, pageSize = 10) =>
+    call<PaginatedWorkLogs>("list_work_logs", { page, pageSize }),
   createWorkLog: (payload: Partial<WorkLog>) =>
-    request<WorkLog>("/api/work-logs", { method: "POST", body: JSON.stringify(payload) }),
+    call<WorkLog>("create_work_log", { payload }),
   updateWorkLog: (id: number, payload: Partial<WorkLog>) =>
-    request<WorkLog>(`/api/work-logs/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
-  deleteWorkLog: (id: number) => request<void>(`/api/work-logs/${id}`, { method: "DELETE" }),
+    call<WorkLog>("update_work_log", { id, payload }),
+  deleteWorkLog: (id: number) => call<void>("delete_work_log", { id }),
 
-  listTemplates: (type?: ReportType) =>
-    request<Template[]>(`/api/templates${type ? `?template_type=${type}` : ""}`),
+  listTemplates: (templateType?: ReportType) =>
+    call<Template[]>("list_templates", { templateType: templateType ?? null }),
   createTemplate: (payload: Partial<Template>) =>
-    request<Template>("/api/templates", { method: "POST", body: JSON.stringify(payload) }),
+    call<Template>("create_template", { payload }),
   importTemplateExample: (payload: { template_type: ReportType; example_content: string }) =>
-    request<TemplateImportExampleResponse>("/api/templates/import-example", {
-      method: "POST",
-      body: JSON.stringify(payload)
-    }),
+    call<TemplateImportExampleResponse>("import_template_example", { payload }),
   optimizeTemplate: (payload: { template_type: ReportType; content: string; optimization_request: string }) =>
-    request<TemplateOptimizeResponse>("/api/templates/optimize", {
-      method: "POST",
-      body: JSON.stringify(payload)
-    }),
+    call<TemplateOptimizeResponse>("optimize_template", { payload }),
   updateTemplate: (id: number, payload: Partial<Template>) =>
-    request<Template>(`/api/templates/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
-  deleteTemplate: (id: number) => request<void>(`/api/templates/${id}`, { method: "DELETE" }),
+    call<Template>("update_template", { id, payload }),
+  deleteTemplate: (id: number) => call<void>("delete_template", { id }),
 
-  listReports: () => request<Report[]>("/api/reports"),
+  listReports: () => call<Report[]>("list_reports"),
   updateReport: (id: number, payload: Partial<Report>) =>
-    request<Report>(`/api/reports/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+    call<Report>("update_report", { id, payload }),
   optimizeReport: (id: number, payload: { content: string; optimization_request: string }) =>
-    request<ReportOptimizeResponse>(`/api/reports/${id}/optimize`, {
-      method: "POST",
-      body: JSON.stringify(payload)
-    }),
-  deleteReport: (id: number) => request<void>(`/api/reports/${id}`, { method: "DELETE" }),
+    call<ReportOptimizeResponse>("optimize_report", { id, payload }),
+  deleteReport: (id: number) => call<void>("delete_report", { id }),
   generateReport: (payload: {
     report_type: ReportType;
     anchor_date?: string;
@@ -83,58 +72,67 @@ export const api = {
     period_end?: string;
     template_id?: number;
     overwrite?: boolean;
-  }) =>
-    request<GenerateResponse>("/api/reports/generate", {
-      method: "POST",
-      body: JSON.stringify(payload)
-    }),
-  listReportEmailDeliveries: (id: number) =>
-    request<ReportEmailDelivery[]>(`/api/reports/${id}/email-deliveries`),
-  sendReportEmail: (id: number, payload: {
+  }) => call<GenerateResponse>("generate_report", { payload }),
+  exportReportDocx: async (reportId: number) => {
+    const path = await save({
+      defaultPath: `worklog-report-${reportId}.docx`,
+      filters: [{ name: "Word Document", extensions: ["docx"] }]
+    });
+    if (!path) {
+      return null;
+    }
+    return call<string>("export_report_docx", { reportId, path });
+  },
+  listReportEmailDeliveries: (reportId: number) =>
+    call<ReportEmailDelivery[]>("list_report_email_deliveries", { reportId }),
+  sendReportEmail: (reportId: number, payload: {
     recipient_ids: number[];
     additional_recipients: string[];
     subject: string;
-  }) => request<ReportEmailDelivery>(`/api/reports/${id}/send-email`, {
-    method: "POST",
-    body: JSON.stringify(payload)
-  }),
+  }) => call<ReportEmailDelivery>("send_report_email", { reportId, payload }),
 
-  listReportSchedules: () => request<ReportSchedule[]>("/api/settings/report-schedules"),
+  listReportSchedules: () => call<ReportSchedule[]>("list_report_schedules"),
   updateReportSchedule: (
     reportType: ReportType,
     payload: Pick<ReportSchedule, "enabled" | "weekday" | "day_of_month" | "template_id" | "run_time" | "auto_send" | "recipient_ids">
-  ) => request<ReportSchedule>(`/api/settings/report-schedules/${reportType}`, {
-    method: "PUT",
-    body: JSON.stringify(payload)
+  ) => call<ReportSchedule>("update_report_schedule", { reportType, payload }),
+
+  getLlmSetting: () => call<LlmSetting | null>("get_llm_setting"),
+  listLlmSettings: () => call<LlmSetting[]>("list_llm_settings"),
+  createLlmSetting: (payload: LlmSetting) =>
+    call<LlmSetting>("create_llm_setting", { payload }),
+  updateLlmSetting: (id: number, payload: LlmSetting) =>
+    call<LlmSetting>("update_llm_setting", { id, payload }),
+  applyLlmSetting: (id: number) => call<LlmSetting>("apply_llm_setting", { id }),
+  deleteLlmSetting: (id: number) => call<void>("delete_llm_setting", { id }),
+
+  getEmailSetting: () => call<EmailSetting | null>("get_email_setting"),
+  updateEmailSetting: (payload: EmailSetting) =>
+    call<EmailSetting>("update_email_setting", { payload }),
+  testEmailSetting: async (recipientEmail: string) => ({
+    sent: await call<boolean>("send_email_test", { recipientEmail })
   }),
 
-  getLlmSetting: () => request<LlmSetting | null>("/api/settings/llm"),
-  listLlmSettings: () => request<LlmSetting[]>("/api/settings/llm/all"),
-  createLlmSetting: (payload: LlmSetting) =>
-    request<LlmSetting>("/api/settings/llm", { method: "PUT", body: JSON.stringify(payload) }),
-  updateLlmSetting: (id: number, payload: LlmSetting) =>
-    request<LlmSetting>(`/api/settings/llm/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
-  applyLlmSetting: (id: number) =>
-    request<LlmSetting>(`/api/settings/llm/${id}/apply`, { method: "POST" }),
-  deleteLlmSetting: (id: number) =>
-    request<void>(`/api/settings/llm/${id}`, { method: "DELETE" }),
-  getEmailSetting: () => request<EmailSetting | null>("/api/settings/email"),
-  updateEmailSetting: (payload: EmailSetting) =>
-    request<EmailSetting>("/api/settings/email", { method: "PUT", body: JSON.stringify(payload) }),
-  testEmailSetting: (recipient_email: string) =>
-    request<{ sent: boolean }>("/api/settings/email/test", {
-      method: "POST",
-      body: JSON.stringify({ recipient_email })
-    }),
-
-  listRecipients: () => request<Recipient[]>("/api/recipients"),
+  listRecipients: () => call<Recipient[]>("list_recipients"),
   createRecipient: (payload: Pick<Recipient, "name" | "email" | "is_default">) =>
-    request<Recipient>("/api/recipients", { method: "POST", body: JSON.stringify(payload) }),
+    call<Recipient>("create_recipient", { payload }),
   updateRecipient: (id: number, payload: Partial<Pick<Recipient, "name" | "email" | "is_default">>) =>
-    request<Recipient>(`/api/recipients/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
-  deleteRecipient: (id: number) => request<void>(`/api/recipients/${id}`, { method: "DELETE" })
-};
+    call<Recipient>("update_recipient", { id, payload }),
+  deleteRecipient: (id: number) => call<void>("delete_recipient", { id }),
 
-export function docxUrl(reportId: number): string {
-  return `${API_BASE}/api/reports/${reportId}/export/docx`;
-}
+  getDesktopPreferences: () => call<DesktopPreferences>("get_desktop_preferences"),
+  setLaunchAtLogin: (enabled: boolean) =>
+    call<DesktopPreferences>("set_launch_at_login", { enabled }),
+  getStartupMigration: () => call<MigrationResult>("get_startup_migration"),
+  importLegacyDatabase: async () => {
+    const path = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "SQLite Database", extensions: ["db", "sqlite", "sqlite3"] }]
+    });
+    if (!path) {
+      return null;
+    }
+    return call<MigrationResult>("import_legacy_database", { path });
+  }
+};

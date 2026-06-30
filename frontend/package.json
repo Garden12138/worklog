@@ -1,6 +1,6 @@
 {
   "name": "worklog-frontend",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,6 +9,9 @@
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.8.0",
+    "@tauri-apps/plugin-autostart": "^2.5.0",
+    "@tauri-apps/plugin-dialog": "^2.6.0",
     "@vitejs/plugin-react": "^4.2.1",
     "vite": "^4.5.3",
     "typescript": "^5.4.5",
@@ -17,7 +20,11 @@
     "lucide-react": "^0.468.0"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.8.0",
     "@types/react": "^18.2.66",
     "@types/react-dom": "^18.2.22"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

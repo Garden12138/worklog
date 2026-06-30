@@ -1,0 +1,14 @@
+{
+  "name": "worklog-desktop",
+  "version": "2.0.0",
+  "private": true,
+  "scripts": {
+    "tauri": "node frontend/node_modules/@tauri-apps/cli/tauri.js",
+    "desktop:dev": "node frontend/node_modules/@tauri-apps/cli/tauri.js dev",
+    "desktop:build": "node frontend/node_modules/@tauri-apps/cli/tauri.js build",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml && npm --prefix frontend run build"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

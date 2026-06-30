@@ -143,3 +143,17 @@ export interface GenerateResponse {
   task_id: number;
   used_llm: boolean;
 }
+
+export interface DesktopPreferences {
+  launch_at_login: boolean;
+  database_path: string;
+  legacy_database_path?: string | null;
+  migrated_at?: string | null;
+}
+
+export interface MigrationResult {
+  imported: boolean;
+  source_path?: string | null;
+  database_path: string;
+  message: string;
+}
