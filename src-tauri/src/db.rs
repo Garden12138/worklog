@@ -315,6 +315,7 @@ async fn verify_integrity(path: &Path) -> AppResult<()> {
     let result: String = sqlx::query_scalar("PRAGMA integrity_check")
         .fetch_one(&mut connection)
         .await?;
+    connection.close().await?;
     if result != "ok" {
         return Err(AppError::new(
             "database_integrity_error",
@@ -450,6 +451,10 @@ mod tests {
         .execute(&legacy.pool)
         .await
         .unwrap();
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(&legacy.pool)
+            .await
+            .unwrap();
         legacy.pool.close().await;
         let source_path = legacy.path.clone();
         let original_bytes = fs::read(&source_path).unwrap();
