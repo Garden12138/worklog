@@ -45,13 +45,28 @@ jobs:
       - name: Build macOS universal DMG
         if: runner.os == 'macOS'
         env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: node frontend/node_modules/@tauri-apps/cli/tauri.js build --target universal-apple-darwin --bundles dmg
+          SIGNING_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          NOTARIZATION_APPLE_ID: ${{ secrets.APPLE_ID }}
+          NOTARIZATION_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          NOTARIZATION_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [[ -n "$SIGNING_CERTIFICATE" && -n "$SIGNING_CERTIFICATE_PASSWORD" && -n "$SIGNING_IDENTITY" ]]; then
+            export APPLE_CERTIFICATE="$SIGNING_CERTIFICATE"
+            export APPLE_CERTIFICATE_PASSWORD="$SIGNING_CERTIFICATE_PASSWORD"
+            export APPLE_SIGNING_IDENTITY="$SIGNING_IDENTITY"
+          else
+            export APPLE_SIGNING_IDENTITY="-"
+          fi
+
+          if [[ -n "$NOTARIZATION_APPLE_ID" && -n "$NOTARIZATION_PASSWORD" && -n "$NOTARIZATION_TEAM_ID" ]]; then
+            export APPLE_ID="$NOTARIZATION_APPLE_ID"
+            export APPLE_PASSWORD="$NOTARIZATION_PASSWORD"
+            export APPLE_TEAM_ID="$NOTARIZATION_TEAM_ID"
+          fi
+
+          node frontend/node_modules/@tauri-apps/cli/tauri.js build --target universal-apple-darwin --bundles dmg
 
       - name: Build Windows x64 NSIS installer
         if: runner.os == 'Windows'
