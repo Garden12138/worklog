@@ -5,6 +5,11 @@ on:
   push:
     branches:
       - v2.0.0
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -79,3 +84,49 @@ jobs:
             src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
           if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download packaged applications
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create or update public release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          mapfile -d '' release_files < <(
+            find release-assets -type f \( -name '*.dmg' -o -name '*-setup.exe' \) -print0
+          )
+
+          if (( ${#release_files[@]} == 0 )); then
+            echo "No packaged applications were downloaded."
+            exit 1
+          fi
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${release_files[@]}" --clobber
+          else
+            release_args=(
+              "$RELEASE_TAG"
+              "${release_files[@]}"
+              --verify-tag
+              --generate-notes
+              --title "Worklog $RELEASE_TAG"
+            )
+            if [[ "$RELEASE_TAG" == *-* ]]; then
+              release_args+=(--prerelease)
+            fi
+            gh release create "${release_args[@]}"
+          fi
