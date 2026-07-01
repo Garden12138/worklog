@@ -2220,7 +2220,7 @@ function ReportSchedulesPanel(props: {
       <div className="settings-intro">
         <p className="section-eyebrow">自动生成</p>
         <h2>定时报告</h2>
-        <p>每种报告独立设置执行时间；定时生成不会覆盖同期间已有草稿。</p>
+        <p>每种报告独立设置执行时间；到达计划时间时会更新同期间旧草稿，并避免重复生成或发送。</p>
         <div className="settings-side-note">
           <span>错过执行</span>
           <strong>启动后只补生成最近一期草稿</strong>
