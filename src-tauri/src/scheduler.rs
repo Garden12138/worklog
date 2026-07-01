@@ -152,6 +152,49 @@ async fn execute(
     let Ok((start, end)) = reports::scheduled_period(&schedule.report_type, occurrence) else {
         return;
     };
+    let Ok(run_time) = parse_time(&schedule.run_time) else {
+        return;
+    };
+    let Ok(scheduled_at) = local_datetime(occurrence, run_time) else {
+        return;
+    };
+    let scheduled_at = scheduled_at.with_timezone(&Utc).to_rfc3339();
+
+    let existing = sqlx::query_as::<_, (i64, String)>(
+        "SELECT id, status FROM reports WHERE report_type=? AND period_start=? AND period_end=?",
+    )
+    .bind(&schedule.report_type)
+    .bind(&start)
+    .bind(&end)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    if let Some((report_id, status)) = existing {
+        if status != "draft" {
+            return;
+        }
+        if delivery_sent_since(pool, report_id, &scheduled_at).await {
+            return;
+        }
+        let generated_since_schedule: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM reports WHERE id=? AND generated_at IS NOT NULL \
+             AND datetime(generated_at) >= datetime(?))",
+        )
+        .bind(report_id)
+        .bind(&scheduled_at)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false);
+        if generated_since_schedule {
+            if let Ok(report) = reports::load_report(pool, report_id).await {
+                deliver_if_enabled(pool, secrets, schedule, &report, allow_email, &scheduled_at)
+                    .await;
+            }
+            return;
+        }
+    }
+
     let generated = reports::generate(
         pool,
         secrets,
@@ -162,7 +205,7 @@ async fn execute(
             period_start: Some(start),
             period_end: Some(end),
             template_id: schedule.template_id,
-            overwrite: false,
+            overwrite: true,
         },
     )
     .await;
@@ -174,7 +217,32 @@ async fn execute(
         .fetch_one(pool)
         .await
         .unwrap_or_else(|_| "failed".into());
-    if status != "success" || !allow_email || !schedule.auto_send {
+    if status != "success" {
+        return;
+    }
+    deliver_if_enabled(
+        pool,
+        secrets,
+        schedule,
+        &generated.report,
+        allow_email,
+        &scheduled_at,
+    )
+    .await;
+}
+
+async fn deliver_if_enabled(
+    pool: &SqlitePool,
+    secrets: &SecretStore,
+    schedule: &ReportScheduleRow,
+    report: &crate::models::Report,
+    allow_email: bool,
+    scheduled_at: &str,
+) {
+    if !allow_email
+        || !schedule.auto_send
+        || delivery_sent_since(pool, report.id, scheduled_at).await
+    {
         return;
     }
     let recipient_ids = sqlx::query_scalar::<_, i64>(
@@ -184,15 +252,19 @@ async fn execute(
     .fetch_all(pool)
     .await
     .unwrap_or_default();
-    let _ = mail::deliver_report(
-        pool,
-        secrets,
-        &generated.report,
-        &recipient_ids,
-        &[],
-        &generated.report.title,
+    let _ = mail::deliver_report(pool, secrets, report, &recipient_ids, &[], &report.title).await;
+}
+
+async fn delivery_sent_since(pool: &SqlitePool, report_id: i64, scheduled_at: &str) -> bool {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM report_email_deliveries WHERE report_id=? AND status='sent' \
+         AND sent_at IS NOT NULL AND datetime(sent_at) >= datetime(?))",
     )
-    .await;
+    .bind(report_id)
+    .bind(scheduled_at)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false)
 }
 
 fn is_due(schedule: &ReportScheduleRow, now: DateTime<Tz>) -> bool {
@@ -325,6 +397,10 @@ fn subtract_month(year: i32, month: u32, offset: i32) -> (i32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Database;
+    use crate::models::ReportGenerateInput;
+    use std::collections::HashSet;
+    use tokio::sync::Mutex;
 
     fn weekly() -> ReportScheduleRow {
         ReportScheduleRow {
@@ -356,5 +432,97 @@ mod tests {
         let now = Shanghai.with_ymd_and_hms(2026, 6, 12, 16, 0, 0).unwrap();
         let next = next_occurrence(&schedule, now).unwrap();
         assert_eq!(next.to_rfc3339(), "2026-06-30T15:00:00+08:00");
+    }
+
+    #[tokio::test]
+    async fn scheduled_execution_overwrites_an_existing_draft_once() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "worklog-scheduler-test-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = Database::open_for_test(directory, None).await.unwrap();
+        let secrets = SecretStore::memory();
+        let active = Arc::new(Mutex::new(HashSet::new()));
+        let initial = reports::generate(
+            &database.pool,
+            &secrets,
+            &active,
+            ReportGenerateInput {
+                report_type: "monthly_report".into(),
+                anchor_date: None,
+                period_start: Some("2026-06-01".into()),
+                period_end: Some("2026-06-30".into()),
+                template_id: None,
+                overwrite: false,
+            },
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE reports SET content_markdown='# stale draft', generated_at='2026-06-29T00:00:00Z' WHERE id=?",
+        )
+        .bind(initial.report.id)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+        let schedule = sqlx::query_as::<_, ReportScheduleRow>(
+            "SELECT id, report_type, enabled, weekday, day_of_month, template_id, run_time, auto_send, created_at, updated_at \
+             FROM report_schedules WHERE report_type='monthly_report'",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        let occurrence = NaiveDate::from_ymd_opt(2026, 6, 30).unwrap();
+
+        execute(
+            &database.pool,
+            &secrets,
+            &active,
+            &schedule,
+            occurrence,
+            false,
+        )
+        .await;
+
+        let refreshed = reports::load_report(&database.pool, initial.report.id)
+            .await
+            .unwrap();
+        assert_ne!(refreshed.content_markdown, "# stale draft");
+        let latest_status: String = sqlx::query_scalar(
+            "SELECT status FROM generation_tasks WHERE report_type='monthly_report' ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(latest_status, "success");
+        let task_count_after_first: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM generation_tasks WHERE report_type='monthly_report'",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+
+        execute(
+            &database.pool,
+            &secrets,
+            &active,
+            &schedule,
+            occurrence,
+            false,
+        )
+        .await;
+
+        let task_count_after_second: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM generation_tasks WHERE report_type='monthly_report'",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(task_count_after_second, task_count_after_first);
     }
 }
