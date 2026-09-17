@@ -423,6 +423,16 @@ mod tests {
             .unwrap();
         assert_eq!(templates, 3);
         assert_eq!(schedules, 3);
+        let capture_settings: (bool, String, String, i64) = sqlx::query_as(
+            "SELECT enabled, run_time, timezone, lookback_days FROM daily_capture_settings WHERE id=1",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            capture_settings,
+            (false, "18:00:00".into(), "Asia/Shanghai".into(), 7)
+        );
         assert!(database.path.exists());
     }
 
@@ -469,6 +479,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(work_log, "Rust migration");
+        let origin: String = sqlx::query_scalar("SELECT origin FROM work_logs WHERE id=41")
+            .fetch_one(&target.pool)
+            .await
+            .unwrap();
+        assert_eq!(origin, "manual");
 
         let secrets = SecretStore::memory();
         secrets.migrate_plaintext(&target.pool).await.unwrap();

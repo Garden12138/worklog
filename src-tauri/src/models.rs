@@ -16,6 +16,12 @@ pub struct WorkLog {
     pub hours: Option<f64>,
     pub priority: String,
     pub notes: Option<String>,
+    pub origin: String,
+    pub auto_capture_date: Option<String>,
+    pub manually_edited: bool,
+    pub git_commit_count: i64,
+    pub agent_session_count: i64,
+    pub pending_evidence_count: i64,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -115,16 +121,11 @@ pub struct LlmSetting {
 pub struct LlmSettingInput {
     pub provider: String,
     pub base_url: Option<String>,
-    pub model: String,
+    pub model: Option<String>,
     pub api_key: Option<String>,
     #[serde(default)]
     pub extra_headers: BTreeMap<String, String>,
-    #[serde(default = "default_timeout")]
-    pub timeout_seconds: i64,
-}
-
-fn default_timeout() -> i64 {
-    60
+    pub timeout_seconds: Option<i64>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -385,4 +386,111 @@ pub struct MigrationResult {
     pub source_path: Option<String>,
     pub database_path: String,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct ActivitySource {
+    pub id: i64,
+    pub source_type: String,
+    pub path: String,
+    pub display_name: String,
+    pub enabled: bool,
+    pub discovered: bool,
+    pub last_scanned_at: Option<String>,
+    pub last_error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActivitySourceInput {
+    pub source_type: String,
+    pub path: String,
+    pub display_name: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub discovered: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ActivitySourceCandidate {
+    pub source_type: String,
+    pub path: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DailyCaptureSettings {
+    pub enabled: bool,
+    pub run_time: String,
+    pub timezone: String,
+    pub lookback_days: i64,
+    pub last_success_at: Option<String>,
+    pub next_run_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct DailyCaptureSettingsRow {
+    pub enabled: bool,
+    pub run_time: String,
+    pub timezone: String,
+    pub lookback_days: i64,
+    pub last_success_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DailyCaptureSettingsInput {
+    pub enabled: bool,
+    pub run_time: String,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct ActivityEvidence {
+    pub id: i64,
+    pub activity_date: String,
+    pub source_id: i64,
+    pub source_type: String,
+    pub source_key: String,
+    pub project: String,
+    pub summary: String,
+    pub occurred_at: String,
+    pub metadata_json: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct DailyCaptureRun {
+    pub id: i64,
+    pub capture_date: String,
+    pub status: String,
+    pub work_log_id: Option<i64>,
+    pub used_llm: bool,
+    pub source_count: i64,
+    pub failed_source_count: i64,
+    pub git_commit_count: i64,
+    pub agent_session_count: i64,
+    pub pending_evidence_count: i64,
+    pub message: Option<String>,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DailyWorkSummary {
+    pub task: String,
+    pub progress: String,
+    pub result: Option<String>,
+    pub blockers: Option<String>,
 }

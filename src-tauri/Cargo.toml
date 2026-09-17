@@ -1,6 +1,6 @@
 [package]
 name = "worklog"
-version = "2.0.0"
+version = "2.0.2"
 description = "Local work log and report desktop application"
 authors = ["Garden12138"]
 edition = "2021"

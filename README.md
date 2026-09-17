@@ -7,7 +7,8 @@ Worklog 2.0 是使用 Tauri 2、Rust、React 和 SQLite 构建的本地桌面工
 - 每日工作记录、分页浏览与项目/工时/优先级管理。
 - 周报、月报和绩效考核表草稿生成、编辑、AI 优化及 DOCX 导出。
 - Markdown + Jinja 风格模板管理，并可使用 LLM 从示例生成或优化模板。
-- OpenAI、NVIDIA、OpenRouter 等 OpenAI-compatible LLM Provider。
+- OpenAI、NVIDIA、OpenRouter、国内 MiniMax M3 等 OpenAI-compatible LLM Provider。
+- 多 Git 仓库与 Codex/Cursor 完成会话的每日自动采集，可配置北京时间执行时间。
 - SMTP 测试、收件人通讯录、HTML 正文与 DOCX 附件投递。
 - 周报、月报、绩效考核表定时生成及可选自动发送。
 - 关闭主窗口后在系统托盘继续运行，可选择登录电脑后自动启动。
@@ -17,6 +18,8 @@ Worklog 2.0 是使用 Tauri 2、Rust、React 和 SQLite 构建的本地桌面工
 数据库保存在操作系统的应用数据目录。第一次启动时会检测旧版项目的 `data/worklog.db` 和 `.env` 中的 `WORKLOG_DATABASE_URL`，验证 SQLite 完整性后复制并迁移；旧数据库不会被修改。未自动发现时，可在“系统设置 → 本地运行”中手动选择数据库。
 
 LLM API Key 和 SMTP 密码会从旧数据库迁移到 macOS Keychain 或 Windows Credential Manager，读取接口只返回脱敏值。
+
+每日自动采集只保存 Git 提交信息以及 Agent 会话的完成摘要、项目路径映射和变更统计，不保存提示词、推理、工具输出或完整对话。启用 AI 汇总后，这些最小化证据会发送给当前启用的 LLM，单日最多 64 KiB。
 
 ## 下载安装
 
@@ -39,7 +42,7 @@ LLM API Key 和 SMTP 密码会从旧数据库迁移到 macOS Keychain 或 Window
 
 进入“系统设置 → LLM 设置”：
 
-1. 选择 OpenAI、NVIDIA 或 OpenRouter，也可以修改为其他兼容 OpenAI API 的 Base URL。
+1. 选择 OpenAI、NVIDIA、OpenRouter 或国内 MiniMax；MiniMax 默认使用 `https://api.minimax.cn/v1` 和 `MiniMax-M3`。
 2. 填写模型名称、API Key 和请求超时时间。
 3. 点击“保存并应用新配置”。保存多组配置后，可在列表中切换当前使用的模型。
 
@@ -75,6 +78,17 @@ LLM API Key 和 SMTP 密码会从旧数据库迁移到 macOS Keychain 或 Window
 3. 点击“保存设置”并确认状态为“已启用”。
 
 到达执行时间时，应用会自动生成报告；如果同周期已有旧草稿，会先更新草稿再继续发送。同一次计划任务不会重复生成或重复发送。应用需要保持运行或驻留系统托盘；若执行时未运行，下次启动只会补生成最近一期草稿，不会自动补发邮件。
+
+### 7. 设置每日自动记录
+
+进入“系统设置 → 每日自动记录”：
+
+1. 添加一个或多个 Git 仓库。采集依赖本机 `git` 命令，并只读取与仓库 `user.email`（无邮箱时为 `user.name`）匹配的提交。
+2. 确认自动发现的 Codex/Cursor 默认目录，或手动添加多个数据目录。默认位置只会展示候选项，未经确认不会读取。
+3. 启用执行计划。默认北京时间 18:00 汇总当天，应用启动时会补齐最近 7 个漏跑日。
+4. 可选择日期立即扫描。重复扫描按提交哈希和会话 ID 去重；18:00 后的内容会在下次扫描补回原自然日。
+
+每个自然日最多生成一条“多项目”自动工作记录。若自动记录已被手工编辑，后续扫描不会覆盖，而会显示待合并来源；只有用户确认“覆盖并合并”后才会重新生成。
 
 ## 开发环境
 
@@ -130,8 +144,8 @@ npm run tauri -- build --target x86_64-pc-windows-msvc --bundles nsis
 发布新版本：
 
 ```bash
-git tag v2.0.1
-git push origin refs/tags/v2.0.1
+git tag v2.0.2
+git push origin refs/tags/v2.0.2
 ```
 
 请将示例版本号替换为本次发布版本。如果版本分支与标签同名，请保留完整的 `refs/tags/...` 写法，避免 Git 无法判断要推送分支还是标签。重新运行同一标签的工作流时，会更新该 Release 中的同名安装包，而不会重复创建 Release。

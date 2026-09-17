@@ -1,6 +1,7 @@
 export type ReportType = "weekly_report" | "monthly_report" | "performance_review";
 export type Priority = "low" | "medium" | "high" | "urgent";
-export type Provider = "openai" | "nvidia" | "openrouter";
+export type Provider = "openai" | "nvidia" | "openrouter" | "minimax";
+export type ActivitySourceType = "git" | "codex" | "cursor";
 export type EmailSecurity = "starttls" | "ssl";
 export type EmailDeliveryStatus = "pending" | "sent" | "failed";
 export type ScheduleWeekday = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
@@ -18,6 +19,12 @@ export interface WorkLog {
   hours?: number | null;
   priority: Priority;
   notes?: string | null;
+  origin: "manual" | "auto";
+  auto_capture_date?: string | null;
+  manually_edited: boolean;
+  git_commit_count: number;
+  agent_session_count: number;
+  pending_evidence_count: number;
   created_at: string;
   updated_at: string;
 }
@@ -156,4 +163,66 @@ export interface MigrationResult {
   source_path?: string | null;
   database_path: string;
   message: string;
+}
+
+export interface ActivitySource {
+  id: number;
+  source_type: ActivitySourceType;
+  path: string;
+  display_name: string;
+  enabled: boolean;
+  discovered: boolean;
+  last_scanned_at?: string | null;
+  last_error?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ActivitySourceCandidate {
+  source_type: ActivitySourceType;
+  path: string;
+  display_name: string;
+}
+
+export interface DailyCaptureSettings {
+  enabled: boolean;
+  run_time: string;
+  timezone: string;
+  lookback_days: number;
+  last_success_at?: string | null;
+  next_run_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DailyCaptureRun {
+  id: number;
+  capture_date: string;
+  status: "pending" | "success" | "partial" | "failed" | "skipped";
+  work_log_id?: number | null;
+  used_llm: boolean;
+  source_count: number;
+  failed_source_count: number;
+  git_commit_count: number;
+  agent_session_count: number;
+  pending_evidence_count: number;
+  message?: string | null;
+  started_at: string;
+  completed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ActivityEvidence {
+  id: number;
+  activity_date: string;
+  source_id: number;
+  source_type: ActivitySourceType;
+  source_key: string;
+  project: string;
+  summary: string;
+  occurred_at: string;
+  metadata_json: string;
+  created_at: string;
+  updated_at: string;
 }

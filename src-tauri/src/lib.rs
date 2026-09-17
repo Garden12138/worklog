@@ -1,3 +1,4 @@
+mod activity;
 mod commands;
 mod db;
 mod documents;
@@ -24,6 +25,7 @@ pub struct AppState {
     pub db: Database,
     pub secrets: SecretStore,
     pub active_generations: ActiveGenerations,
+    pub capture_lock: Arc<Mutex<()>>,
     pub scheduler_notify: Arc<Notify>,
 }
 
@@ -52,17 +54,20 @@ pub fn run() {
             let secrets = SecretStore::system();
             tauri::async_runtime::block_on(secrets.migrate_plaintext(&db.pool))?;
             let active_generations = Arc::new(Mutex::new(HashSet::new()));
+            let capture_lock = Arc::new(Mutex::new(()));
             let scheduler_notify = Arc::new(Notify::new());
             scheduler::start(
                 db.pool.clone(),
                 secrets.clone(),
                 active_generations.clone(),
+                capture_lock.clone(),
                 scheduler_notify.clone(),
             );
             app.manage(AppState {
                 db,
                 secrets,
                 active_generations,
+                capture_lock,
                 scheduler_notify,
             });
 
@@ -133,6 +138,16 @@ pub fn run() {
             commands::delete_recipient,
             commands::list_report_schedules,
             commands::update_report_schedule,
+            commands::list_activity_sources,
+            commands::discover_activity_sources,
+            commands::create_activity_source,
+            commands::update_activity_source,
+            commands::delete_activity_source,
+            commands::get_daily_capture_settings,
+            commands::update_daily_capture_settings,
+            commands::list_daily_capture_runs,
+            commands::list_activity_evidence,
+            commands::run_daily_capture,
             commands::get_desktop_preferences,
             commands::set_launch_at_login,
             commands::get_startup_migration,

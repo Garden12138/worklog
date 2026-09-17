@@ -1,3 +1,4 @@
+use crate::activity;
 use crate::db::now_string;
 use crate::error::{AppError, AppResult};
 use crate::llm;
@@ -9,7 +10,7 @@ use crate::templates::validate_template;
 use crate::AppState;
 use sqlx::{QueryBuilder, Row, Sqlite};
 use std::path::PathBuf;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 
 fn clean_optional(value: Option<String>) -> Option<String> {
@@ -42,7 +43,7 @@ pub async fn list_work_logs(
         .fetch_one(&state.db.pool)
         .await?;
     let items = sqlx::query_as::<_, WorkLog>(
-        "SELECT id, work_date, start_date, end_date, project, task, progress, result, blockers, hours, priority, notes, created_at, updated_at \
+        "SELECT id, work_date, start_date, end_date, project, task, progress, result, blockers, hours, priority, notes, origin, auto_capture_date, manually_edited, git_commit_count, agent_session_count, pending_evidence_count, created_at, updated_at \
          FROM work_logs ORDER BY start_date DESC, end_date DESC, id DESC LIMIT ? OFFSET ?",
     )
     .bind(page_size)
@@ -140,7 +141,7 @@ pub async fn update_work_log(
     )?;
     let now = now_string();
     sqlx::query(
-        "UPDATE work_logs SET work_date=?, start_date=?, end_date=?, project=?, task=?, progress=?, result=?, blockers=?, hours=?, priority=?, notes=?, updated_at=? WHERE id=?",
+        "UPDATE work_logs SET work_date=?, start_date=?, end_date=?, project=?, task=?, progress=?, result=?, blockers=?, hours=?, priority=?, notes=?, manually_edited=CASE WHEN origin='auto' THEN 1 ELSE manually_edited END, updated_at=? WHERE id=?",
     )
     .bind(&start)
     .bind(&start)
@@ -174,7 +175,7 @@ pub async fn delete_work_log(state: State<'_, AppState>, id: i64) -> AppResult<(
 
 async fn load_work_log(state: &AppState, id: i64) -> AppResult<WorkLog> {
     sqlx::query_as::<_, WorkLog>(
-        "SELECT id, work_date, start_date, end_date, project, task, progress, result, blockers, hours, priority, notes, created_at, updated_at FROM work_logs WHERE id=?",
+        "SELECT id, work_date, start_date, end_date, project, task, progress, result, blockers, hours, priority, notes, origin, auto_capture_date, manually_edited, git_commit_count, agent_session_count, pending_evidence_count, created_at, updated_at FROM work_logs WHERE id=?",
     )
     .bind(id)
     .fetch_optional(&state.db.pool)
@@ -549,11 +550,16 @@ pub async fn send_report_email(
     .await
 }
 
-fn default_base_url(provider: &str) -> AppResult<&'static str> {
+fn provider_defaults(provider: &str) -> AppResult<(&'static str, &'static str, i64)> {
     match provider {
-        "openai" => Ok("https://api.openai.com/v1"),
-        "nvidia" => Ok("https://integrate.api.nvidia.com/v1"),
-        "openrouter" => Ok("https://openrouter.ai/api/v1"),
+        "openai" => Ok(("https://api.openai.com/v1", "gpt-4.1-mini", 60)),
+        "nvidia" => Ok((
+            "https://integrate.api.nvidia.com/v1",
+            "meta/llama-3.1-70b-instruct",
+            180,
+        )),
+        "openrouter" => Ok(("https://openrouter.ai/api/v1", "openai/gpt-4.1-mini", 60)),
+        "minimax" => Ok(("https://api.minimax.cn/v1", "MiniMax-M3", 180)),
         _ => Err(AppError::validation("provider", "Unsupported LLM provider")),
     }
 }
@@ -618,11 +624,17 @@ pub async fn create_llm_setting(
     payload: LlmSettingInput,
 ) -> AppResult<LlmSetting> {
     let provider = payload.provider.clone();
-    let base_url = clean_optional(payload.base_url).unwrap_or(default_base_url(&provider)?.into());
+    let defaults = provider_defaults(&provider)?;
+    let base_url = clean_optional(payload.base_url).unwrap_or(defaults.0.into());
     url::Url::parse(&base_url)
         .map_err(|_| AppError::validation("base_url", "A valid base URL is required"))?;
-    let model = require_text(Some(payload.model), "model", Some(160))?;
-    if !(5..=600).contains(&payload.timeout_seconds) {
+    let model = require_text(
+        Some(clean_optional(payload.model).unwrap_or(defaults.1.into())),
+        "model",
+        Some(160),
+    )?;
+    let timeout_seconds = payload.timeout_seconds.unwrap_or(defaults.2);
+    if !(5..=600).contains(&timeout_seconds) {
         return Err(AppError::validation(
             "timeout_seconds",
             "timeout_seconds must be between 5 and 600",
@@ -654,7 +666,7 @@ pub async fn create_llm_setting(
     .bind(base_url)
     .bind(model)
     .bind(serde_json::to_string(&payload.extra_headers)?)
-    .bind(payload.timeout_seconds)
+    .bind(timeout_seconds)
     .bind(&now)
     .bind(&now)
     .execute(&mut *transaction)
@@ -680,12 +692,17 @@ pub async fn update_llm_setting(
     payload: LlmSettingInput,
 ) -> AppResult<LlmSetting> {
     let current = load_llm_row(&state, id).await?;
-    let base_url =
-        clean_optional(payload.base_url).unwrap_or(default_base_url(&payload.provider)?.into());
+    let defaults = provider_defaults(&payload.provider)?;
+    let base_url = clean_optional(payload.base_url).unwrap_or(defaults.0.into());
     url::Url::parse(&base_url)
         .map_err(|_| AppError::validation("base_url", "A valid base URL is required"))?;
-    let model = require_text(Some(payload.model), "model", Some(160))?;
-    if !(5..=600).contains(&payload.timeout_seconds) {
+    let model = require_text(
+        Some(clean_optional(payload.model).unwrap_or(defaults.1.into())),
+        "model",
+        Some(160),
+    )?;
+    let timeout_seconds = payload.timeout_seconds.unwrap_or(defaults.2);
+    if !(5..=600).contains(&timeout_seconds) {
         return Err(AppError::validation(
             "timeout_seconds",
             "timeout_seconds must be between 5 and 600",
@@ -704,7 +721,7 @@ pub async fn update_llm_setting(
     .bind(base_url)
     .bind(model)
     .bind(serde_json::to_string(&payload.extra_headers)?)
-    .bind(payload.timeout_seconds)
+    .bind(timeout_seconds)
     .bind(&now)
     .bind(id)
     .execute(&mut *transaction)
@@ -1100,6 +1117,184 @@ pub async fn update_report_schedule(
 }
 
 #[tauri::command]
+pub async fn list_activity_sources(state: State<'_, AppState>) -> AppResult<Vec<ActivitySource>> {
+    Ok(sqlx::query_as::<_, ActivitySource>(
+        "SELECT id, source_type, path, display_name, enabled, discovered, last_scanned_at, last_error, created_at, updated_at FROM activity_sources ORDER BY source_type, display_name, id",
+    )
+    .fetch_all(&state.db.pool)
+    .await?)
+}
+
+#[tauri::command]
+pub async fn discover_activity_sources(app: AppHandle) -> AppResult<Vec<ActivitySourceCandidate>> {
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|error| AppError::new("path_error", error.to_string()))?;
+    Ok(activity::default_source_candidates(&home))
+}
+
+#[tauri::command]
+pub async fn create_activity_source(
+    state: State<'_, AppState>,
+    payload: ActivitySourceInput,
+) -> AppResult<ActivitySource> {
+    let path = activity::normalize_source_path(&payload.source_type, &payload.path).await?;
+    let default_name = PathBuf::from(&path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(&payload.source_type)
+        .to_string();
+    let display_name = require_text(
+        payload.display_name.or(Some(default_name)),
+        "display_name",
+        Some(160),
+    )?;
+    let now = now_string();
+    let id = sqlx::query(
+        "INSERT INTO activity_sources(source_type, path, display_name, enabled, discovered, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(payload.source_type)
+    .bind(path)
+    .bind(display_name)
+    .bind(payload.enabled)
+    .bind(payload.discovered)
+    .bind(&now)
+    .bind(&now)
+    .execute(&state.db.pool)
+    .await?
+    .last_insert_rowid();
+    state.scheduler_notify.notify_one();
+    load_activity_source(&state, id).await
+}
+
+#[tauri::command]
+pub async fn update_activity_source(
+    state: State<'_, AppState>,
+    id: i64,
+    payload: ActivitySourceInput,
+) -> AppResult<ActivitySource> {
+    let current = load_activity_source(&state, id).await?;
+    let path = if !payload.enabled
+        && payload.source_type == current.source_type
+        && payload.path == current.path
+    {
+        current.path
+    } else {
+        activity::normalize_source_path(&payload.source_type, &payload.path).await?
+    };
+    let display_name = require_text(payload.display_name, "display_name", Some(160))?;
+    sqlx::query(
+        "UPDATE activity_sources SET source_type=?, path=?, display_name=?, enabled=?, discovered=?, last_error=NULL, updated_at=? WHERE id=?",
+    )
+    .bind(payload.source_type)
+    .bind(path)
+    .bind(display_name)
+    .bind(payload.enabled)
+    .bind(payload.discovered)
+    .bind(now_string())
+    .bind(id)
+    .execute(&state.db.pool)
+    .await?;
+    state.scheduler_notify.notify_one();
+    load_activity_source(&state, id).await
+}
+
+#[tauri::command]
+pub async fn delete_activity_source(state: State<'_, AppState>, id: i64) -> AppResult<()> {
+    load_activity_source(&state, id).await?;
+    sqlx::query("DELETE FROM activity_sources WHERE id=?")
+        .bind(id)
+        .execute(&state.db.pool)
+        .await?;
+    state.scheduler_notify.notify_one();
+    Ok(())
+}
+
+async fn load_activity_source(state: &AppState, id: i64) -> AppResult<ActivitySource> {
+    sqlx::query_as::<_, ActivitySource>(
+        "SELECT id, source_type, path, display_name, enabled, discovered, last_scanned_at, last_error, created_at, updated_at FROM activity_sources WHERE id=?",
+    )
+    .bind(id)
+    .fetch_optional(&state.db.pool)
+    .await?
+    .ok_or_else(|| AppError::not_found("Activity source"))
+}
+
+#[tauri::command]
+pub async fn get_daily_capture_settings(
+    state: State<'_, AppState>,
+) -> AppResult<DailyCaptureSettings> {
+    activity::load_settings(&state.db.pool).await
+}
+
+#[tauri::command]
+pub async fn update_daily_capture_settings(
+    state: State<'_, AppState>,
+    payload: DailyCaptureSettingsInput,
+) -> AppResult<DailyCaptureSettings> {
+    let run_time = chrono::NaiveTime::parse_from_str(&payload.run_time, "%H:%M:%S%.f")
+        .or_else(|_| chrono::NaiveTime::parse_from_str(&payload.run_time, "%H:%M"))
+        .map_err(|_| AppError::validation("run_time", "run_time must use HH:MM format"))?
+        .format("%H:%M:%S")
+        .to_string();
+    if payload.enabled {
+        let enabled_sources: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM activity_sources WHERE enabled=1")
+                .fetch_one(&state.db.pool)
+                .await?;
+        if enabled_sources == 0 {
+            return Err(AppError::validation(
+                "enabled",
+                "Enable at least one activity source before starting daily capture",
+            ));
+        }
+    }
+    sqlx::query("UPDATE daily_capture_settings SET enabled=?, run_time=?, updated_at=? WHERE id=1")
+        .bind(payload.enabled)
+        .bind(run_time)
+        .bind(now_string())
+        .execute(&state.db.pool)
+        .await?;
+    state.scheduler_notify.notify_one();
+    activity::load_settings(&state.db.pool).await
+}
+
+#[tauri::command]
+pub async fn list_daily_capture_runs(
+    state: State<'_, AppState>,
+    limit: Option<i64>,
+) -> AppResult<Vec<DailyCaptureRun>> {
+    activity::list_runs(&state.db.pool, limit.unwrap_or(14)).await
+}
+
+#[tauri::command]
+pub async fn list_activity_evidence(
+    state: State<'_, AppState>,
+    date: String,
+) -> AppResult<Vec<ActivityEvidence>> {
+    let date = reports::parse_date(&date, "date")?;
+    activity::list_evidence(&state.db.pool, date).await
+}
+
+#[tauri::command]
+pub async fn run_daily_capture(
+    state: State<'_, AppState>,
+    date: String,
+    force_overwrite: Option<bool>,
+) -> AppResult<DailyCaptureRun> {
+    let date = reports::parse_date(&date, "date")?;
+    activity::run_capture(
+        &state.db.pool,
+        &state.secrets,
+        &state.capture_lock,
+        date,
+        force_overwrite.unwrap_or(false),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn get_desktop_preferences(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -1175,9 +1370,13 @@ mod tests {
     #[test]
     fn applies_provider_defaults() {
         assert_eq!(
-            default_base_url("openai").unwrap(),
-            "https://api.openai.com/v1"
+            provider_defaults("openai").unwrap(),
+            ("https://api.openai.com/v1", "gpt-4.1-mini", 60)
         );
-        assert!(default_base_url("unsupported").is_err());
+        assert_eq!(
+            provider_defaults("minimax").unwrap(),
+            ("https://api.minimax.cn/v1", "MiniMax-M3", 180)
+        );
+        assert!(provider_defaults("unsupported").is_err());
     }
 }

@@ -1,3 +1,4 @@
+use crate::activity;
 use crate::error::{AppError, AppResult};
 use crate::mail;
 use crate::models::{ReportGenerateInput, ReportSchedule, ReportScheduleRow};
@@ -7,7 +8,7 @@ use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, TimeZone, Timel
 use chrono_tz::{Asia::Shanghai, Tz};
 use sqlx::SqlitePool;
 use std::sync::Arc;
-use tokio::sync::Notify;
+use tokio::sync::{Mutex, Notify};
 
 pub async fn list_schedules(pool: &SqlitePool) -> AppResult<Vec<ReportSchedule>> {
     let rows = sqlx::query_as::<_, ReportScheduleRow>(
@@ -67,18 +68,22 @@ pub fn start(
     pool: SqlitePool,
     secrets: SecretStore,
     active: ActiveGenerations,
+    capture_lock: Arc<Mutex<()>>,
     notify: Arc<Notify>,
 ) {
     tauri::async_runtime::spawn(async move {
         run_catchups(&pool, &secrets, &active).await;
+        activity::run_catchups(&pool, &secrets, &capture_lock).await;
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
                     run_due(&pool, &secrets, &active).await;
                     run_catchups(&pool, &secrets, &active).await;
+                    activity::run_due(&pool, &secrets, &capture_lock).await;
                 }
                 _ = notify.notified() => {
                     run_catchups(&pool, &secrets, &active).await;
+                    activity::run_catchups(&pool, &secrets, &capture_lock).await;
                 }
             }
         }

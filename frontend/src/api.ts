@@ -2,6 +2,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 
 import type {
+  ActivityEvidence,
+  ActivitySource,
+  ActivitySourceCandidate,
+  ActivitySourceType,
+  DailyCaptureRun,
+  DailyCaptureSettings,
   DesktopPreferences,
   EmailSetting,
   GenerateResponse,
@@ -119,6 +125,40 @@ export const api = {
   updateRecipient: (id: number, payload: Partial<Pick<Recipient, "name" | "email" | "is_default">>) =>
     call<Recipient>("update_recipient", { id, payload }),
   deleteRecipient: (id: number) => call<void>("delete_recipient", { id }),
+
+  listActivitySources: () => call<ActivitySource[]>("list_activity_sources"),
+  discoverActivitySources: () => call<ActivitySourceCandidate[]>("discover_activity_sources"),
+  createActivitySource: (payload: {
+    source_type: ActivitySourceType;
+    path: string;
+    display_name?: string;
+    enabled: boolean;
+    discovered: boolean;
+  }) => call<ActivitySource>("create_activity_source", { payload }),
+  updateActivitySource: (id: number, payload: {
+    source_type: ActivitySourceType;
+    path: string;
+    display_name: string;
+    enabled: boolean;
+    discovered: boolean;
+  }) => call<ActivitySource>("update_activity_source", { id, payload }),
+  deleteActivitySource: (id: number) => call<void>("delete_activity_source", { id }),
+  getDailyCaptureSettings: () => call<DailyCaptureSettings>("get_daily_capture_settings"),
+  updateDailyCaptureSettings: (payload: { enabled: boolean; run_time: string }) =>
+    call<DailyCaptureSettings>("update_daily_capture_settings", { payload }),
+  listDailyCaptureRuns: (limit = 14) =>
+    call<DailyCaptureRun[]>("list_daily_capture_runs", { limit }),
+  listActivityEvidence: (date: string) =>
+    call<ActivityEvidence[]>("list_activity_evidence", { date }),
+  runDailyCapture: (date: string, forceOverwrite = false) =>
+    call<DailyCaptureRun>("run_daily_capture", { date, forceOverwrite }),
+  chooseActivityDirectories: async () => {
+    const selected = await open({ multiple: true, directory: true });
+    if (!selected) {
+      return [];
+    }
+    return Array.isArray(selected) ? selected : [selected];
+  },
 
   getDesktopPreferences: () => call<DesktopPreferences>("get_desktop_preferences"),
   setLaunchAtLogin: (enabled: boolean) =>

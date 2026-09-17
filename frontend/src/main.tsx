@@ -7,10 +7,12 @@ import {
   ClipboardList,
   Download,
   FileText,
+  FolderPlus,
   LoaderCircle,
   Mail,
   NotebookTabs,
   Pencil,
+  Play,
   Plus,
   RefreshCw,
   Save,
@@ -23,6 +25,12 @@ import {
 
 import { api } from "./api";
 import type {
+  ActivityEvidence,
+  ActivitySource,
+  ActivitySourceCandidate,
+  ActivitySourceType,
+  DailyCaptureRun,
+  DailyCaptureSettings,
   DesktopPreferences,
   EmailSetting,
   LlmSetting,
@@ -51,17 +59,26 @@ const reportLabels: Record<ReportType, string> = {
 const providerLabels: Record<Provider, string> = {
   openai: "OpenAI",
   nvidia: "NVIDIA",
-  openrouter: "OpenRouter"
+  openrouter: "OpenRouter",
+  minimax: "MiniMax"
 };
 
 const providerDefaults: Record<Provider, { base_url: string; model: string; timeout_seconds: number }> = {
   openai: { base_url: "https://api.openai.com/v1", model: "gpt-4.1-mini", timeout_seconds: 60 },
   nvidia: { base_url: "https://integrate.api.nvidia.com/v1", model: "meta/llama-3.1-70b-instruct", timeout_seconds: 180 },
-  openrouter: { base_url: "https://openrouter.ai/api/v1", model: "openai/gpt-4.1-mini", timeout_seconds: 60 }
+  openrouter: { base_url: "https://openrouter.ai/api/v1", model: "openai/gpt-4.1-mini", timeout_seconds: 60 },
+  minimax: { base_url: "https://api.minimax.cn/v1", model: "MiniMax-M3", timeout_seconds: 180 }
 };
 
 function today() {
-  return new Date().toISOString().slice(0, 10);
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(new Date());
+  const value = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${value.year}-${value.month}-${value.day}`;
 }
 
 function App() {
@@ -84,6 +101,10 @@ function App() {
   const [reportSchedules, setReportSchedules] = React.useState<ReportSchedule[]>([]);
   const [desktopPreferences, setDesktopPreferences] = React.useState<DesktopPreferences | null>(null);
   const [migrationResult, setMigrationResult] = React.useState<MigrationResult | null>(null);
+  const [activitySources, setActivitySources] = React.useState<ActivitySource[]>([]);
+  const [activityCandidates, setActivityCandidates] = React.useState<ActivitySourceCandidate[]>([]);
+  const [dailyCaptureSettings, setDailyCaptureSettings] = React.useState<DailyCaptureSettings | null>(null);
+  const [dailyCaptureRuns, setDailyCaptureRuns] = React.useState<DailyCaptureRun[]>([]);
   const [notice, setNotice] = React.useState("");
   const [error, setError] = React.useState("");
   const [loading, setLoading] = React.useState(true);
@@ -102,7 +123,11 @@ function App() {
         recipientList,
         scheduleList,
         desktop,
-        migration
+        migration,
+        sources,
+        candidates,
+        captureSettings,
+        captureRuns
       ] = await Promise.all([
         api.listWorkLogs(pageOverride, pageSizeOverride),
         api.listReports(),
@@ -113,7 +138,11 @@ function App() {
         api.listRecipients(),
         api.listReportSchedules(),
         api.getDesktopPreferences(),
-        api.getStartupMigration()
+        api.getStartupMigration(),
+        api.listActivitySources(),
+        api.discoverActivitySources(),
+        api.getDailyCaptureSettings(),
+        api.listDailyCaptureRuns()
       ]);
       setWorkLogs(logsPage.items);
       setWorkLogMeta(logsPage);
@@ -126,6 +155,10 @@ function App() {
       setReportSchedules(scheduleList);
       setDesktopPreferences(desktop);
       setMigrationResult(migration);
+      setActivitySources(sources);
+      setActivityCandidates(candidates);
+      setDailyCaptureSettings(captureSettings);
+      setDailyCaptureRuns(captureRuns);
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载失败");
     } finally {
@@ -282,6 +315,10 @@ function App() {
             reportSchedules={reportSchedules}
             desktopPreferences={desktopPreferences}
             migrationResult={migrationResult}
+            activitySources={activitySources}
+            activityCandidates={activityCandidates}
+            dailyCaptureSettings={dailyCaptureSettings}
+            dailyCaptureRuns={dailyCaptureRuns}
             onSave={(payload) => run(
               () => (payload.id
                 ? api.updateLlmSetting(payload.id, payload)
@@ -300,6 +337,35 @@ function App() {
             onCreateRecipient={(payload) => run(() => api.createRecipient(payload).then(() => undefined), "收件人已添加")}
             onUpdateRecipient={(id, payload) => run(() => api.updateRecipient(id, payload).then(() => undefined), "收件人已更新")}
             onDeleteRecipient={(id) => run(() => api.deleteRecipient(id), "收件人已删除")}
+            onCreateActivitySource={(payload) => run(
+              () => api.createActivitySource(payload).then(() => undefined),
+              "采集目录已添加"
+            )}
+            onUpdateActivitySource={(id, payload) => run(
+              () => api.updateActivitySource(id, payload).then(() => undefined),
+              "采集目录已更新"
+            )}
+            onDeleteActivitySource={(id) => run(
+              () => api.deleteActivitySource(id),
+              "采集目录已删除"
+            )}
+            onSaveDailyCaptureSettings={(payload) => run(
+              () => api.updateDailyCaptureSettings(payload).then(() => undefined),
+              payload.enabled ? "每日自动记录已启用" : "每日自动记录设置已保存"
+            )}
+            onRunDailyCapture={async (date, forceOverwrite) => {
+              setError("");
+              setNotice("");
+              try {
+                const result = await api.runDailyCapture(date, forceOverwrite);
+                setNotice(result.status === "skipped" ? "当天没有发现完成事项" : "每日工作记录扫描完成");
+                await refresh();
+                return result;
+              } catch (err) {
+                setError(err instanceof Error ? err.message : "自动记录扫描失败");
+                throw err;
+              }
+            }}
             onSetLaunchAtLogin={async (enabled) => {
               const next = await api.setLaunchAtLogin(enabled);
               setDesktopPreferences(next);
@@ -526,8 +592,15 @@ function WorkLogsPage(props: {
               <div className="row-meta">
                 <span className="meta-date">{dateRangeLabel(item)}</span>
                 <span className="meta-project">{item.project}</span>
+                {item.origin === "auto" && <span className="auto-capture-badge">自动采集</span>}
                 <span className={`priority-badge priority-${item.priority}`}>{priorityLabel(item.priority)}</span>
                 {item.hours != null && <span className="hours-badge">{item.hours}h</span>}
+                {item.origin === "auto" && (
+                  <span className="source-count-badge">Git {item.git_commit_count} · Agent {item.agent_session_count}</span>
+                )}
+                {item.pending_evidence_count > 0 && (
+                  <span className="pending-evidence-badge">{item.pending_evidence_count} 条待合并</span>
+                )}
               </div>
               <h3>{item.task}</h3>
               <p>{item.progress}</p>
@@ -1887,6 +1960,10 @@ function SettingsPage(props: {
   reportSchedules: ReportSchedule[];
   desktopPreferences: DesktopPreferences | null;
   migrationResult: MigrationResult | null;
+  activitySources: ActivitySource[];
+  activityCandidates: ActivitySourceCandidate[];
+  dailyCaptureSettings: DailyCaptureSettings | null;
+  dailyCaptureRuns: DailyCaptureRun[];
   onSave: (payload: LlmSetting) => Promise<void>;
   onApplyLlmSetting: (id: number) => Promise<void>;
   onDeleteLlmSetting: (id: number) => Promise<void>;
@@ -1899,6 +1976,23 @@ function SettingsPage(props: {
   onCreateRecipient: (payload: Pick<Recipient, "name" | "email" | "is_default">) => Promise<void>;
   onUpdateRecipient: (id: number, payload: Partial<Pick<Recipient, "name" | "email" | "is_default">>) => Promise<void>;
   onDeleteRecipient: (id: number) => Promise<void>;
+  onCreateActivitySource: (payload: {
+    source_type: ActivitySourceType;
+    path: string;
+    display_name?: string;
+    enabled: boolean;
+    discovered: boolean;
+  }) => Promise<void>;
+  onUpdateActivitySource: (id: number, payload: {
+    source_type: ActivitySourceType;
+    path: string;
+    display_name: string;
+    enabled: boolean;
+    discovered: boolean;
+  }) => Promise<void>;
+  onDeleteActivitySource: (id: number) => Promise<void>;
+  onSaveDailyCaptureSettings: (payload: { enabled: boolean; run_time: string }) => Promise<void>;
+  onRunDailyCapture: (date: string, forceOverwrite: boolean) => Promise<DailyCaptureRun>;
   onSetLaunchAtLogin: (enabled: boolean) => Promise<void>;
   onImportLegacy: () => Promise<void>;
 }) {
@@ -2115,6 +2209,7 @@ function SettingsPage(props: {
                 <option value="openai">OpenAI</option>
                 <option value="nvidia">NVIDIA</option>
                 <option value="openrouter">OpenRouter</option>
+                <option value="minimax">MiniMax（国内）</option>
               </select>
             </label>
             <label>
@@ -2177,6 +2272,17 @@ function SettingsPage(props: {
           </button>
         </div>
       </form>
+      <DailyCapturePanel
+        sources={props.activitySources}
+        candidates={props.activityCandidates}
+        settings={props.dailyCaptureSettings}
+        runs={props.dailyCaptureRuns}
+        onCreateSource={props.onCreateActivitySource}
+        onUpdateSource={props.onUpdateActivitySource}
+        onDeleteSource={props.onDeleteActivitySource}
+        onSaveSettings={props.onSaveDailyCaptureSettings}
+        onRun={props.onRunDailyCapture}
+      />
       <ReportSchedulesPanel
         schedules={props.reportSchedules}
         templates={props.templates}
@@ -2193,6 +2299,306 @@ function SettingsPage(props: {
       />
     </div>
   );
+}
+
+function DailyCapturePanel(props: {
+  sources: ActivitySource[];
+  candidates: ActivitySourceCandidate[];
+  settings: DailyCaptureSettings | null;
+  runs: DailyCaptureRun[];
+  onCreateSource: (payload: {
+    source_type: ActivitySourceType;
+    path: string;
+    display_name?: string;
+    enabled: boolean;
+    discovered: boolean;
+  }) => Promise<void>;
+  onUpdateSource: (id: number, payload: {
+    source_type: ActivitySourceType;
+    path: string;
+    display_name: string;
+    enabled: boolean;
+    discovered: boolean;
+  }) => Promise<void>;
+  onDeleteSource: (id: number) => Promise<void>;
+  onSaveSettings: (payload: { enabled: boolean; run_time: string }) => Promise<void>;
+  onRun: (date: string, forceOverwrite: boolean) => Promise<DailyCaptureRun>;
+}) {
+  const [form, setForm] = React.useState({ enabled: false, run_time: "18:00" });
+  const [scanDate, setScanDate] = React.useState(today());
+  const [evidence, setEvidence] = React.useState<ActivityEvidence[]>([]);
+  const [isAdding, setIsAdding] = React.useState<ActivitySourceType | null>(null);
+  const [isScanning, setIsScanning] = React.useState(false);
+
+  React.useEffect(() => {
+    if (props.settings) {
+      setForm({
+        enabled: props.settings.enabled,
+        run_time: props.settings.run_time.slice(0, 5)
+      });
+    }
+  }, [props.settings?.enabled, props.settings?.run_time]);
+
+  React.useEffect(() => {
+    let active = true;
+    void api.listActivityEvidence(scanDate).then((items) => {
+      if (active) {
+        setEvidence(items);
+      }
+    }).catch(() => {
+      if (active) {
+        setEvidence([]);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [scanDate, props.runs]);
+
+  const unconfiguredCandidates = props.candidates.filter((candidate) =>
+    !props.sources.some((source) => source.source_type === candidate.source_type && source.path === candidate.path)
+  );
+  const selectedRun = props.runs.find((run) => run.capture_date === scanDate);
+
+  async function chooseDirectories(sourceType: ActivitySourceType) {
+    setIsAdding(sourceType);
+    try {
+      const paths = await api.chooseActivityDirectories();
+      for (const path of paths) {
+        await props.onCreateSource({
+          source_type: sourceType,
+          path,
+          enabled: true,
+          discovered: false
+        });
+      }
+    } finally {
+      setIsAdding(null);
+    }
+  }
+
+  async function runCapture(forceOverwrite: boolean) {
+    if (forceOverwrite && !window.confirm("这会覆盖该日期已手工编辑的自动记录，是否继续？")) {
+      return;
+    }
+    setIsScanning(true);
+    try {
+      await props.onRun(scanDate, forceOverwrite);
+      setEvidence(await api.listActivityEvidence(scanDate));
+    } finally {
+      setIsScanning(false);
+    }
+  }
+
+  async function removeSource(source: ActivitySource) {
+    if (window.confirm(`删除采集目录「${source.display_name}」？已生成的工作记录不会被删除。`)) {
+      await props.onDeleteSource(source.id);
+    }
+  }
+
+  return (
+    <section className="panel settings-panel daily-capture-panel">
+      <div className="settings-intro">
+        <p className="section-eyebrow">自动采集</p>
+        <h2>每日自动记录</h2>
+        <p>从本人 Git 提交和已完成的 Codex/Cursor 会话生成每天一条“多项目”工作记录。</p>
+        <div className="settings-side-note">
+          <span>隐私范围</span>
+          <strong>只读取完成摘要与变更统计</strong>
+          <p>不会读取提示词、推理、工具输出或完整对话；发送给 LLM 的证据最多 64 KiB。</p>
+        </div>
+      </div>
+
+      <div className="settings-section activity-source-section">
+        <div className="saved-llm-header">
+          <div>
+            <h3>采集目录</h3>
+            <p>Git 仓库可以添加多个；Codex 和 Cursor 默认目录需要确认后才会启用。</p>
+          </div>
+          <span className="count-badge">{props.sources.length} 个</span>
+        </div>
+
+        {unconfiguredCandidates.length > 0 && (
+          <div className="activity-candidate-list">
+            {unconfiguredCandidates.map((candidate) => (
+              <div className="activity-candidate" key={`${candidate.source_type}-${candidate.path}`}>
+                <div>
+                  <strong>发现 {activitySourceLabel(candidate.source_type)}</strong>
+                  <small>{candidate.path}</small>
+                </div>
+                <button
+                  className="secondary"
+                  type="button"
+                  onClick={() => void props.onCreateSource({
+                    ...candidate,
+                    enabled: true,
+                    discovered: true
+                  })}
+                >
+                  确认启用
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="activity-source-list">
+          {props.sources.length === 0 ? (
+            <p className="empty-hint">尚未配置采集目录。先添加至少一个 Git 仓库或 Agent 数据目录。</p>
+          ) : props.sources.map((source) => (
+            <div className={source.enabled ? "activity-source active" : "activity-source"} key={source.id}>
+              <label className="toggle">
+                <input
+                  type="checkbox"
+                  checked={source.enabled}
+                  onChange={(event) => void props.onUpdateSource(source.id, {
+                    source_type: source.source_type,
+                    path: source.path,
+                    display_name: source.display_name,
+                    enabled: event.target.checked,
+                    discovered: source.discovered
+                  })}
+                />
+                <span>{activitySourceLabel(source.source_type)}</span>
+              </label>
+              <div className="activity-source-main">
+                <strong>{source.display_name}</strong>
+                <small>{source.path}</small>
+                {source.last_error && <em>{source.last_error}</em>}
+              </div>
+              <button
+                className="icon-button danger"
+                type="button"
+                title="删除采集目录"
+                aria-label={`删除 ${source.display_name}`}
+                onClick={() => void removeSource(source)}
+              >
+                <Trash2 size={16} />
+              </button>
+            </div>
+          ))}
+        </div>
+
+        <div className="activity-add-actions">
+          {(["git", "codex", "cursor"] as ActivitySourceType[]).map((sourceType) => (
+            <button
+              className="secondary"
+              type="button"
+              disabled={isAdding !== null}
+              key={sourceType}
+              onClick={() => void chooseDirectories(sourceType)}
+            >
+              <FolderPlus size={16} />
+              {isAdding === sourceType ? "正在添加" : `添加 ${activitySourceLabel(sourceType)}`}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <form
+        className="settings-section capture-schedule-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void props.onSaveSettings(form);
+        }}
+      >
+        <h3>执行计划</h3>
+        <p>默认北京时间 18:00 汇总当天；下次执行还会重扫前一天，将晚间活动补回原自然日。</p>
+        <div className="capture-schedule-row">
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={form.enabled}
+              onChange={(event) => setForm({ ...form, enabled: event.target.checked })}
+            />
+            启用每日自动记录
+          </label>
+          <label>
+            每日执行时间
+            <input
+              type="time"
+              required
+              value={form.run_time}
+              onChange={(event) => setForm({ ...form, run_time: event.target.value })}
+            />
+          </label>
+          <button className="primary" type="submit" disabled={form.enabled && props.sources.every((source) => !source.enabled)}>
+            <Save size={16} />保存计划
+          </button>
+        </div>
+        <p className="form-hint">
+          下次执行：{props.settings?.next_run_at ? formatScheduleDate(props.settings.next_run_at) : "未安排"}
+          {props.settings?.last_success_at ? ` · 最近成功：${new Date(props.settings.last_success_at).toLocaleString("zh-CN")}` : ""}
+        </p>
+      </form>
+
+      <div className="settings-section capture-run-section">
+        <div className="saved-llm-header">
+          <div>
+            <h3>立即扫描与运行记录</h3>
+            <p>可扫描任意日期；重复扫描会按提交哈希和会话 ID 去重。</p>
+          </div>
+        </div>
+        <div className="capture-run-controls">
+          <input type="date" value={scanDate} onChange={(event) => setScanDate(event.target.value)} />
+          <button className="primary" type="button" disabled={isScanning || props.sources.every((source) => !source.enabled)} onClick={() => void runCapture(false)}>
+            <Play size={16} />{isScanning ? "扫描中" : "立即扫描"}
+          </button>
+          {selectedRun && selectedRun.pending_evidence_count > 0 && (
+            <button className="secondary danger" type="button" disabled={isScanning} onClick={() => void runCapture(true)}>
+              覆盖并合并待处理来源
+            </button>
+          )}
+        </div>
+
+        {props.runs.length > 0 && (
+          <div className="capture-run-list">
+            {props.runs.slice(0, 7).map((run) => (
+              <button className={run.capture_date === scanDate ? "capture-run active" : "capture-run"} type="button" key={run.id} onClick={() => setScanDate(run.capture_date)}>
+                <strong>{run.capture_date}</strong>
+                <span className={`capture-status ${run.status}`}>{captureStatusLabel(run.status)}</span>
+                <small>
+                  来源 {run.source_count}
+                  {run.failed_source_count > 0 ? `（失败 ${run.failed_source_count}）` : ""}
+                  {` · Git ${run.git_commit_count} · Agent ${run.agent_session_count}`}
+                </small>
+                {run.pending_evidence_count > 0 && <em>{run.pending_evidence_count} 条待合并</em>}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {selectedRun?.message && <p className={selectedRun.status === "failed" ? "field-error" : "form-hint"}>{selectedRun.message}</p>}
+        {evidence.length > 0 && (
+          <details className="capture-evidence">
+            <summary>查看 {scanDate} 的 {evidence.length} 条来源摘要</summary>
+            <div>
+              {evidence.map((item) => (
+                <article key={item.id}>
+                  <span>{activitySourceLabel(item.source_type)} · {item.project}</span>
+                  <p>{item.summary}</p>
+                </article>
+              ))}
+            </div>
+          </details>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function activitySourceLabel(sourceType: ActivitySourceType) {
+  return { git: "Git 仓库", codex: "Codex", cursor: "Cursor" }[sourceType];
+}
+
+function captureStatusLabel(status: DailyCaptureRun["status"]) {
+  return {
+    pending: "执行中",
+    success: "成功",
+    partial: "部分成功",
+    failed: "失败",
+    skipped: "无事项"
+  }[status];
 }
 
 const weekdayLabels: Record<ScheduleWeekday, string> = {

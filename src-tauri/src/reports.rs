@@ -134,7 +134,7 @@ async fn generate_inner(
         let template = get_template(pool, report_type, template_id).await?;
         validate_template(&template.content)?;
         let logs = sqlx::query_as::<_, WorkLog>(
-            "SELECT id, work_date, start_date, end_date, project, task, progress, result, blockers, hours, priority, notes, created_at, updated_at \
+            "SELECT id, work_date, start_date, end_date, project, task, progress, result, blockers, hours, priority, notes, origin, auto_capture_date, manually_edited, git_commit_count, agent_session_count, pending_evidence_count, created_at, updated_at \
              FROM work_logs WHERE end_date >= ? AND start_date <= ? ORDER BY start_date, end_date, id",
         )
         .bind(period_start)
