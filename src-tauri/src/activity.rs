@@ -1611,7 +1611,7 @@ mod tests {
         assert!(progress.contains("完成第一项"));
         assert!(progress.contains("完成第二项"));
         database.pool.close().await;
-        fs::remove_dir_all(root).unwrap();
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]
@@ -1683,6 +1683,6 @@ mod tests {
         .unwrap();
         assert!(broken_error.is_some());
         database.pool.close().await;
-        fs::remove_dir_all(root).unwrap();
+        let _ = fs::remove_dir_all(root);
     }
 }
