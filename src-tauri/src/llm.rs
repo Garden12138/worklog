@@ -2,6 +2,7 @@ use crate::error::{AppError, AppResult};
 use crate::models::{DailyWorkSummary, LlmSettingRow, WorkLog};
 use crate::secrets::{llm_secret_key, SecretStore};
 use crate::templates::{format_logs, report_title};
+use regex::Regex;
 use reqwest::Client;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
@@ -83,7 +84,7 @@ pub async fn generate_report(
         "temperature": 0.2
     });
     Ok(LlmResult {
-        content: chat(config, payload).await?,
+        content: strip_markdown_fence(&chat(config, payload).await?),
         used_llm: true,
     })
 }
@@ -232,6 +233,7 @@ pub async fn summarize_daily_activity(
 }
 
 async fn chat(config: &LlmConfig, mut payload: Value) -> AppResult<String> {
+    require_final_answer_only(&mut payload);
     if config.provider == "nvidia" && config.model == "deepseek-ai/deepseek-v4-pro" {
         payload["temperature"] = json!(1);
         payload["top_p"] = json!(0.95);
@@ -263,7 +265,26 @@ async fn chat(config: &LlmConfig, mut payload: Value) -> AppResult<String> {
             format!("LLM provider returned HTTP {}: {detail}", status.as_u16()),
         ));
     }
-    extract_chat_content(&body)
+    sanitize_chat_content(&extract_chat_content(&body)?)
+}
+
+fn require_final_answer_only(payload: &mut Value) {
+    const INSTRUCTION: &str =
+        "只输出最终答案；不要输出思考、分析或推理过程，也不要输出 <think>、<analysis> 或 <reasoning> 标签。";
+    let Some(messages) = payload.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let Some(content) = messages.iter_mut().find_map(|message| {
+        (message.get("role").and_then(Value::as_str) == Some("system"))
+            .then(|| message.get_mut("content"))
+            .flatten()
+    }) else {
+        return;
+    };
+    let Some(existing) = content.as_str() else {
+        return;
+    };
+    *content = Value::String(format!("{existing}\n{INSTRUCTION}"));
 }
 
 fn build_chat_request(
@@ -316,6 +337,37 @@ fn extract_chat_content(value: &Value) -> AppResult<String> {
         "llm_error",
         "LLM provider returned a chat choice without message content",
     ))
+}
+
+fn sanitize_chat_content(value: &str) -> AppResult<String> {
+    let mut content = value.trim_start_matches('\u{feff}').to_string();
+    for tag in ["think", "analysis", "reasoning"] {
+        content = remove_reasoning_tag(&content, tag);
+    }
+    let content = content.trim().to_string();
+    if content.is_empty() {
+        return Err(AppError::new(
+            "llm_error",
+            "LLM provider returned reasoning content without a final answer",
+        ));
+    }
+    Ok(content)
+}
+
+fn remove_reasoning_tag(value: &str, tag: &str) -> String {
+    let block = Regex::new(&format!(r"(?is)<{tag}(?:\s[^>]*)?>.*?</{tag}\s*>"))
+        .expect("reasoning block regex must be valid");
+    let mut content = block.replace_all(value, "").into_owned();
+
+    let opening = Regex::new(&format!(r"(?is)<{tag}(?:\s[^>]*)?>"))
+        .expect("reasoning opening tag regex must be valid");
+    if let Some(unclosed) = opening.find(&content) {
+        content.truncate(unclosed.start());
+    }
+
+    let closing = Regex::new(&format!(r"(?is)</{tag}\s*>"))
+        .expect("reasoning closing tag regex must be valid");
+    closing.replace_all(&content, "").into_owned()
 }
 
 fn provider_error(value: &Value) -> Option<String> {
@@ -399,6 +451,51 @@ mod tests {
             strip_markdown_fence("```markdown\n# Report\n```"),
             "# Report"
         );
+    }
+
+    #[test]
+    fn strips_reasoning_blocks_from_chat_content() {
+        let content = sanitize_chat_content(
+            "<think>用户提供了工作记录，我需要先梳理内容。</think>\n\n# 周报\n\n- 完成功能开发",
+        )
+        .unwrap();
+        assert_eq!(content, "# 周报\n\n- 完成功能开发");
+    }
+
+    #[test]
+    fn strips_reasoning_tags_case_insensitively() {
+        let content = sanitize_chat_content(
+            "<THINK data-model=\"MiniMax-M3\">private</THINK>\n<analysis>hidden</analysis>\n最终答案",
+        )
+        .unwrap();
+        assert_eq!(content, "最终答案");
+    }
+
+    #[test]
+    fn strips_stray_reasoning_closing_tag() {
+        let content = sanitize_chat_content("</think>\n# 最终报告").unwrap();
+        assert_eq!(content, "# 最终报告");
+    }
+
+    #[test]
+    fn rejects_unclosed_reasoning_without_final_answer() {
+        let error = sanitize_chat_content("<think>只有推理过程，没有最终答案")
+            .expect_err("reasoning-only responses should not be saved");
+        assert!(error.message.contains("without a final answer"));
+    }
+
+    #[test]
+    fn appends_final_answer_instruction_to_system_message() {
+        let mut payload = json!({
+            "messages": [
+                {"role": "system", "content": "生成周报。"},
+                {"role": "user", "content": "工作记录"}
+            ]
+        });
+        require_final_answer_only(&mut payload);
+        let system = payload["messages"][0]["content"].as_str().unwrap();
+        assert!(system.contains("只输出最终答案"));
+        assert!(system.contains("<think>"));
     }
 
     #[test]

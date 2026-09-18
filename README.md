@@ -144,8 +144,8 @@ npm run tauri -- build --target x86_64-pc-windows-msvc --bundles nsis
 发布新版本：
 
 ```bash
-git tag v2.0.2
-git push origin refs/tags/v2.0.2
+git tag v2.0.3
+git push origin refs/tags/v2.0.3
 ```
 
 请将示例版本号替换为本次发布版本。如果版本分支与标签同名，请保留完整的 `refs/tags/...` 写法，避免 Git 无法判断要推送分支还是标签。重新运行同一标签的工作流时，会更新该 Release 中的同名安装包，而不会重复创建 Release。
