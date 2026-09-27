@@ -667,6 +667,7 @@ textarea {
   font-size: 14px;
   line-height: 1.62;
   margin: 4px 0;
+  white-space: pre-line;
 }
 
 .row-card .muted {

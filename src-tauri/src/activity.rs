@@ -10,7 +10,7 @@ use chrono::{DateTime, Duration, NaiveDate, NaiveTime, TimeZone, Timelike, Utc};
 use chrono_tz::{Asia::Shanghai, Tz};
 use serde_json::{json, Value};
 use sqlx::sqlite::SqliteConnectOptions;
-use sqlx::{Connection, SqliteConnection, SqlitePool};
+use sqlx::{Connection, Row, SqliteConnection, SqlitePool};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -64,24 +64,107 @@ pub fn canonicalize_source_path(path: &str) -> AppResult<String> {
     Ok(canonical.to_string_lossy().to_string())
 }
 
+fn is_git_repo(path: &Path) -> bool {
+    let git_dir = path.join(".git");
+    git_dir.is_dir() || git_dir.is_file()
+}
+
+pub fn discover_git_repos(root: &Path) -> Vec<PathBuf> {
+    let mut repos = Vec::new();
+    if !root.is_dir() {
+        return repos;
+    }
+
+    // 1. Check direct children for Git repositories
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && is_git_repo(&path) {
+                repos.push(path);
+            }
+        }
+    }
+
+    // 2. If direct child git repos were found, root is a workspace containing child repos
+    if !repos.is_empty() {
+        if is_git_repo(root) {
+            let has_commits = Command::new("git")
+                .args(["-C"])
+                .arg(root)
+                .args(["rev-parse", "--verify", "HEAD"])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if has_commits {
+                repos.push(root.to_path_buf());
+            }
+        }
+        repos.sort();
+        return repos;
+    }
+
+    // 3. If root itself is a git repo, return it directly
+    if is_git_repo(root) {
+        return vec![root.to_path_buf()];
+    }
+
+    // 4. If no direct child git repos were found, check 1 more level (e.g. packages/repo)
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir()
+                && !path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .starts_with('.')
+            {
+                if let Ok(sub_entries) = fs::read_dir(&path) {
+                    for sub_entry in sub_entries.flatten() {
+                        let sub_path = sub_entry.path();
+                        if sub_path.is_dir() && is_git_repo(&sub_path) {
+                            repos.push(sub_path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !repos.is_empty() {
+        repos.sort();
+        return repos;
+    }
+
+    // 5. Fallback: if root is a subdirectory inside a git repo
+    let output = Command::new("git")
+        .args(["-C"])
+        .arg(root)
+        .args(["rev-parse", "--show-toplevel"])
+        .output();
+    if let Ok(output) = output {
+        if output.status.success() {
+            let top_level = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !top_level.is_empty() {
+                repos.push(PathBuf::from(top_level));
+            }
+        }
+    }
+
+    repos.sort();
+    repos
+}
+
 pub async fn validate_source(source_type: &str, path: &str) -> AppResult<()> {
     validate_source_type(source_type)?;
     let path = PathBuf::from(path);
     match source_type {
         "git" => {
-            let output = tokio::task::spawn_blocking(move || {
-                Command::new("git")
-                    .args(["-C"])
-                    .arg(path)
-                    .args(["rev-parse", "--show-toplevel"])
-                    .output()
-            })
-            .await
-            .map_err(|error| AppError::new("git_error", error.to_string()))??;
-            if !output.status.success() {
+            let repos = discover_git_repos(&path);
+            if repos.is_empty() {
                 return Err(AppError::validation(
                     "path",
-                    "The selected directory is not a readable Git repository",
+                    "The selected directory is not a Git repository or workspace containing Git repositories",
                 ));
             }
         }
@@ -96,10 +179,10 @@ pub async fn validate_source(source_type: &str, path: &str) -> AppResult<()> {
             }
         }
         "cursor" => {
-            if cursor_workspace_roots(&path).is_empty() {
+            if cursor_workspace_roots(&path).is_empty() && cursor_global_dbs(&path).is_empty() {
                 return Err(AppError::validation(
                     "path",
-                    "A Cursor directory must contain workspaceStorage",
+                    "A Cursor directory must contain workspaceStorage or globalStorage",
                 ));
             }
         }
@@ -116,10 +199,22 @@ pub async fn normalize_source_path(source_type: &str, path: &str) -> AppResult<S
         return Ok(canonical);
     }
     let candidate = PathBuf::from(&canonical);
+    let repos = discover_git_repos(&candidate);
+    if repos.is_empty() {
+        return Err(AppError::validation(
+            "path",
+            "The selected directory is not a Git repository or workspace containing Git repositories",
+        ));
+    }
+    // If it's a multi-repo workspace containing child git repositories, preserve canonical workspace root!
+    if repos.iter().any(|r| r.starts_with(&candidate) && r != &candidate) {
+        return Ok(canonical);
+    }
+    // Single git repository: resolve top-level root
     let output = tokio::task::spawn_blocking(move || {
         Command::new("git")
             .args(["-C"])
-            .arg(candidate)
+            .arg(&candidate)
             .args(["rev-parse", "--show-toplevel"])
             .output()
     })
@@ -157,7 +252,7 @@ pub fn default_source_candidates(home: &Path) -> Vec<ActivitySourceCandidate> {
         vec![home.join(".config/Cursor/User")]
     };
     for cursor in cursor_paths {
-        if !cursor_workspace_roots(&cursor).is_empty() {
+        if !cursor_workspace_roots(&cursor).is_empty() || !cursor_global_dbs(&cursor).is_empty() {
             candidates.push(ActivitySourceCandidate {
                 source_type: "cursor".into(),
                 path: cursor.to_string_lossy().to_string(),
@@ -225,11 +320,16 @@ pub async fn run_capture(
     )
     .fetch_all(pool)
     .await?;
-    let workspaces = sources
-        .iter()
-        .filter(|source| source.source_type == "git")
-        .map(|source| (PathBuf::from(&source.path), source.display_name.clone()))
-        .collect::<Vec<_>>();
+    let mut workspaces = Vec::new();
+    for source in sources.iter().filter(|s| s.source_type == "git") {
+        let p = PathBuf::from(&source.path);
+        workspaces.push((p.clone(), source.display_name.clone()));
+        for child in discover_git_repos(&p) {
+            if child != p {
+                workspaces.push((child, source.display_name.clone()));
+            }
+        }
+    }
     let source_count = sources.len() as i64;
 
     let mut source_errors = Vec::new();
@@ -475,104 +575,167 @@ async fn collect_source(
 }
 
 fn collect_git(source: &ActivitySource, date: NaiveDate) -> AppResult<Vec<CollectedEvidence>> {
-    let path = Path::new(&source.path);
-    let email = git_config(path, "user.email")?;
-    let name = git_config(path, "user.name")?;
-    if email.is_empty() && name.is_empty() {
+    let source_path = Path::new(&source.path);
+    let repos = discover_git_repos(source_path);
+    if repos.is_empty() {
+        return Err(AppError::new(
+            "git_error",
+            "The configured Git repository or workspace directory was not found or contains no Git repositories",
+        ));
+    }
+
+    let global_email = git_config(source_path, "user.email").unwrap_or_default();
+    let global_name = git_config(source_path, "user.name").unwrap_or_default();
+
+    let has_any_identity = !global_email.is_empty()
+        || !global_name.is_empty()
+        || repos.iter().any(|r| {
+            !git_config(r, "user.email").unwrap_or_default().is_empty()
+                || !git_config(r, "user.name").unwrap_or_default().is_empty()
+        });
+    if !has_any_identity {
         return Err(AppError::new(
             "git_identity_missing",
             "Git user.email or user.name is required to identify your commits",
         ));
     }
+
     let (start, end) = day_bounds(date)?;
     let format = "%x1e%H%x1f%cI%x1f%an%x1f%ae%x1f%s%x1f%b%x1d";
-    let output = Command::new("git")
-        .args(["-C"])
-        .arg(path)
-        .args([
-            "-c",
-            "core.quotepath=false",
-            "log",
-            "--all",
-            "--no-merges",
-            &format!("--since={}", start.to_rfc3339()),
-            &format!("--until={}", end.to_rfc3339()),
-            &format!("--format={format}"),
-            "--numstat",
-        ])
-        .output()?;
-    if !output.status.success() {
-        return Err(AppError::new(
-            "git_error",
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ));
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
+    let is_workspace = repos.len() > 1 || repos.first() != Some(&source_path.to_path_buf());
+
     let mut result = Vec::new();
-    for record in text
-        .split('\x1e')
-        .filter(|record| !record.trim().is_empty())
-    {
-        let Some((header, file_text)) = record.split_once('\x1d') else {
-            continue;
-        };
-        let fields = header.splitn(6, '\x1f').collect::<Vec<_>>();
-        if fields.len() != 6 {
-            continue;
-        }
-        let author_matches = if !email.is_empty() {
-            fields[3].trim().eq_ignore_ascii_case(email.trim())
+    let mut seen_commits = HashSet::new();
+
+    for repo in &repos {
+        let repo_email = git_config(repo, "user.email").unwrap_or_default();
+        let repo_name = git_config(repo, "user.name").unwrap_or_default();
+
+        let effective_email = if !repo_email.is_empty() {
+            repo_email
         } else {
-            fields[2].trim() == name.trim()
+            global_email.clone()
         };
-        if !author_matches {
+        let effective_name = if !repo_name.is_empty() {
+            repo_name
+        } else {
+            global_name.clone()
+        };
+
+        if effective_email.is_empty() && effective_name.is_empty() {
             continue;
         }
-        let occurred_at = DateTime::parse_from_rfc3339(fields[1].trim())
-            .map_err(|error| AppError::new("git_error", error.to_string()))?
-            .with_timezone(&Utc);
-        if occurred_at < start || occurred_at >= end {
+
+        let output = Command::new("git")
+            .args(["-C"])
+            .arg(repo)
+            .args([
+                "-c",
+                "core.quotepath=false",
+                "log",
+                "--all",
+                "--no-merges",
+                &format!("--since={}", start.to_rfc3339()),
+                &format!("--until={}", end.to_rfc3339()),
+                &format!("--format={format}"),
+                "--numstat",
+            ])
+            .output()?;
+        if !output.status.success() {
             continue;
         }
-        let stats = file_text
-            .lines()
-            .filter_map(parse_numstat)
-            .collect::<Vec<_>>();
-        let file_count = stats.len();
-        let additions = stats.iter().map(|(added, _, _)| added).sum::<i64>();
-        let deletions = stats.iter().map(|(_, deleted, _)| deleted).sum::<i64>();
-        let files = stats
-            .iter()
-            .map(|(_, _, file)| file.as_str())
-            .take(20)
-            .collect::<Vec<_>>();
-        let body = fields[5].trim();
-        let mut summary = fields[4].trim().to_string();
-        if !body.is_empty() {
-            summary.push_str(" — ");
-            summary.push_str(body);
+
+        let text = String::from_utf8_lossy(&output.stdout);
+        let repo_sub_name = repo.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+        for record in text
+            .split('\x1e')
+            .filter(|record| !record.trim().is_empty())
+        {
+            let Some((header, file_text)) = record.split_once('\x1d') else {
+                continue;
+            };
+            let fields = header.splitn(6, '\x1f').collect::<Vec<_>>();
+            if fields.len() != 6 {
+                continue;
+            }
+            let commit_sha = fields[0].trim();
+            let author_name = fields[2].trim();
+            let author_email = fields[3].trim();
+
+            let author_matches = if !effective_email.is_empty() {
+                author_email.eq_ignore_ascii_case(&effective_email)
+                    || (!global_email.is_empty() && author_email.eq_ignore_ascii_case(&global_email))
+            } else {
+                author_name == effective_name
+                    || (!global_name.is_empty() && author_name == global_name)
+            };
+            if !author_matches {
+                continue;
+            }
+
+            let source_key = format!("git:{}:{}", repo.display(), commit_sha);
+            if !seen_commits.insert(source_key.clone()) {
+                continue;
+            }
+
+            let occurred_at = match DateTime::parse_from_rfc3339(fields[1].trim()) {
+                Ok(dt) => dt.with_timezone(&Utc),
+                Err(_) => continue,
+            };
+            if occurred_at < start || occurred_at >= end {
+                continue;
+            }
+
+            let stats = file_text
+                .lines()
+                .filter_map(parse_numstat)
+                .collect::<Vec<_>>();
+            let file_count = stats.len();
+            let additions = stats.iter().map(|(added, _, _)| added).sum::<i64>();
+            let deletions = stats.iter().map(|(_, deleted, _)| deleted).sum::<i64>();
+            let files = stats
+                .iter()
+                .map(|(_, _, file)| file.as_str())
+                .take(20)
+                .collect::<Vec<_>>();
+            let body = fields[5].trim();
+            let commit_subject = fields[4].trim();
+
+            let mut summary = if is_workspace && !repo_sub_name.is_empty() {
+                format!("[{repo_sub_name}] {commit_subject}")
+            } else {
+                commit_subject.to_string()
+            };
+
+            let clean_body = clean_commit_body(body);
+            if !clean_body.is_empty() {
+                summary.push_str(" — ");
+                summary.push_str(&clean_body);
+            }
+            if file_count > 0 {
+                summary.push_str(&format!(
+                    "（涉及 {file_count} 个文件，+{additions}/-{deletions} 行：{}）",
+                    files.join("、")
+                ));
+            }
+            result.push(CollectedEvidence {
+                source_id: source.id,
+                source_type: "git".into(),
+                source_key,
+                project: source.display_name.clone(),
+                summary: truncate_utf8_bytes(&summary, MAX_SUMMARY_BYTES),
+                occurred_at,
+                metadata: json!({
+                    "repo": repo_sub_name,
+                    "commit": commit_sha,
+                    "files_changed": file_count,
+                    "lines_added": additions,
+                    "lines_removed": deletions,
+                    "files": files
+                }),
+            });
         }
-        if file_count > 0 {
-            summary.push_str(&format!(
-                "（涉及 {file_count} 个文件，+{additions}/-{deletions} 行：{}）",
-                files.join("、")
-            ));
-        }
-        result.push(CollectedEvidence {
-            source_id: source.id,
-            source_type: "git".into(),
-            source_key: format!("git:{}:{}", source.path, fields[0].trim()),
-            project: source.display_name.clone(),
-            summary: truncate_utf8_bytes(&summary, MAX_SUMMARY_BYTES),
-            occurred_at,
-            metadata: json!({
-                "commit": fields[0].trim(),
-                "files_changed": file_count,
-                "lines_added": additions,
-                "lines_removed": deletions,
-                "files": files
-            }),
-        });
     }
     Ok(result)
 }
@@ -590,6 +753,26 @@ fn parse_numstat(line: &str) -> Option<(i64, i64, String)> {
         deleted.parse().unwrap_or(0),
         file.to_string(),
     ))
+}
+
+fn clean_commit_body(body: &str) -> String {
+    let mut lines = Vec::new();
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("co-authored-by:")
+            || lower.starts_with("signed-off-by:")
+            || lower.starts_with("change-id:")
+            || lower.starts_with("reviewed-by:")
+        {
+            continue;
+        }
+        lines.push(trimmed);
+    }
+    lines.join("；")
 }
 
 fn git_config(path: &Path, key: &str) -> AppResult<String> {
@@ -707,11 +890,174 @@ async fn collect_cursor(
 ) -> AppResult<Vec<CollectedEvidence>> {
     let (start, end) = day_bounds(date)?;
     let mut result = Vec::new();
-    let roots = cursor_workspace_roots(Path::new(&source.path));
-    for root in roots {
-        for entry in fs::read_dir(root)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
+    let mut seen_keys = HashSet::new();
+
+    let path = Path::new(&source.path);
+    let workspace_roots = cursor_workspace_roots(path);
+    let global_dbs = cursor_global_dbs(path);
+
+    // 1. Scan modern Cursor globalStorage/state.vscdb (composerHeaders table)
+    for db_path in global_dbs {
+        let options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .read_only(true)
+            .busy_timeout(std::time::Duration::from_secs(5));
+        let mut connection = match SqliteConnection::connect_with(&options).await {
+            Ok(connection) => connection,
+            Err(_) => continue,
+        };
+
+        let has_headers = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='composerHeaders'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap_or(0);
+
+        if has_headers > 0 {
+            let rows = sqlx::query(
+                "SELECT composerId, workspaceId, createdAt, lastUpdatedAt, isArchived, isSubagent, checkpointAt, value FROM composerHeaders",
+            )
+            .fetch_all(&mut connection)
+            .await
+            .unwrap_or_default();
+
+            for row in rows {
+                let is_subagent: Option<i64> = row.try_get("isSubagent").ok();
+                if is_subagent == Some(1) {
+                    continue;
+                }
+                let raw_value: Option<String> = row.try_get("value").ok();
+                let Some(raw_value) = raw_value else {
+                    continue;
+                };
+                let Ok(composer) = serde_json::from_str::<Value>(&raw_value) else {
+                    continue;
+                };
+
+                if composer.get("isDraft").and_then(Value::as_bool) == Some(true)
+                    || composer
+                        .get("hasBlockingPendingActions")
+                        .and_then(Value::as_bool)
+                        == Some(true)
+                    || composer.get("isEphemeral").and_then(Value::as_bool) == Some(true)
+                    || composer.get("isSubagent").and_then(Value::as_bool) == Some(true)
+                    || composer.get("subagentInfo").is_some()
+                {
+                    continue;
+                }
+
+                let composer_id_col: Option<String> = row.try_get("composerId").ok();
+                let composer_id = composer
+                    .get("composerId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or(composer_id_col);
+                let Some(composer_id) = composer_id else {
+                    continue;
+                };
+
+                let last_updated_col: Option<i64> = row.try_get("lastUpdatedAt").ok();
+                let checkpoint_at_col: Option<i64> = row.try_get("checkpointAt").ok();
+                let created_at_col: Option<i64> = row.try_get("createdAt").ok();
+
+                let occurred_at = composer
+                    .get("lastUpdatedAt")
+                    .or_else(|| composer.get("conversationCheckpointLastUpdatedAt"))
+                    .or_else(|| composer.get("createdAt"))
+                    .and_then(json_timestamp)
+                    .or_else(|| last_updated_col.and_then(timestamp_from_millis))
+                    .or_else(|| checkpoint_at_col.and_then(timestamp_from_millis))
+                    .or_else(|| created_at_col.and_then(timestamp_from_millis));
+
+                let Some(occurred_at) = occurred_at else {
+                    continue;
+                };
+                if occurred_at < start || occurred_at >= end {
+                    continue;
+                }
+
+                let raw_name = composer.get("name").and_then(Value::as_str);
+                let name = raw_name.unwrap_or("Cursor 完成会话");
+                let subtitle = composer
+                    .get("summary")
+                    .or_else(|| composer.get("subtitle"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let files = composer
+                    .get("filesChangedCount")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                let added = composer
+                    .get("totalLinesAdded")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                let removed = composer
+                    .get("totalLinesRemoved")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+
+                if files == 0 && added == 0 && removed == 0 {
+                    continue;
+                }
+
+                let clean_subtitle = if subtitle.starts_with("Edited ") || subtitle.starts_with("Read ") {
+                    ""
+                } else {
+                    subtitle
+                };
+                let summary = if name == "Cursor 完成会话" && !clean_subtitle.is_empty() {
+                    format!("{clean_subtitle}（涉及 {files} 个文件变更，+{added}/-{removed} 行）")
+                } else if clean_subtitle.is_empty() || clean_subtitle == name {
+                    format!("{name}（涉及 {files} 个文件变更，+{added}/-{removed} 行）")
+                } else {
+                    format!("{name}：{clean_subtitle}（涉及 {files} 个文件变更，+{added}/-{removed} 行）")
+                };
+
+                let workspace_id_col: Option<String> = row.try_get("workspaceId").ok();
+                let workspace_path = cursor_composer_workspace_path(
+                    &composer,
+                    workspace_id_col.as_deref(),
+                    &workspace_roots,
+                );
+
+                let source_key = format!("cursor:{composer_id}");
+                if !seen_keys.insert(source_key.clone()) {
+                    continue;
+                }
+
+                result.push(CollectedEvidence {
+                    source_id: source.id,
+                    source_type: "cursor".into(),
+                    source_key,
+                    project: project_for_path(
+                        workspace_path.as_deref(),
+                        workspaces,
+                        &source.display_name,
+                    ),
+                    summary: truncate_utf8_bytes(&summary, MAX_SUMMARY_BYTES),
+                    occurred_at,
+                    metadata: json!({
+                        "composer_id": composer_id,
+                        "files_changed": files,
+                        "lines_added": added,
+                        "lines_removed": removed
+                    }),
+                });
+            }
+        }
+    }
+
+    // 2. Scan legacy Cursor workspaceStorage/*/state.vscdb
+    for root in &workspace_roots {
+        let Ok(entries) = fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 continue;
             }
             let db_path = entry.path().join("state.vscdb");
@@ -721,7 +1067,8 @@ async fn collect_cursor(
             let workspace_path = cursor_workspace_path(&entry.path().join("workspace.json"));
             let options = SqliteConnectOptions::new()
                 .filename(&db_path)
-                .read_only(true);
+                .read_only(true)
+                .busy_timeout(std::time::Duration::from_secs(5));
             let mut connection = match SqliteConnection::connect_with(&options).await {
                 Ok(connection) => connection,
                 Err(_) => continue,
@@ -751,6 +1098,10 @@ async fn collect_cursor(
                 let Some(composer_id) = composer.get("composerId").and_then(Value::as_str) else {
                     continue;
                 };
+                let source_key = format!("cursor:{composer_id}");
+                if !seen_keys.insert(source_key.clone()) {
+                    continue;
+                }
                 let Some(occurred_at) = composer
                     .get("lastUpdatedAt")
                     .or_else(|| composer.get("createdAt"))
@@ -782,15 +1133,25 @@ async fn collect_cursor(
                     .get("totalLinesRemoved")
                     .and_then(Value::as_i64)
                     .unwrap_or(0);
-                let summary = if subtitle.is_empty() {
-                    format!("{name}（变更 {files} 个文件，+{added}/-{removed} 行）")
+                if files == 0 && added == 0 && removed == 0 {
+                    continue;
+                }
+                let clean_subtitle = if subtitle.starts_with("Edited ") || subtitle.starts_with("Read ") {
+                    ""
                 } else {
-                    format!("{name}：{subtitle}（变更 {files} 个文件，+{added}/-{removed} 行）")
+                    subtitle
+                };
+                let summary = if name == "Cursor 完成会话" && !clean_subtitle.is_empty() {
+                    format!("{clean_subtitle}（涉及 {files} 个文件变更，+{added}/-{removed} 行）")
+                } else if clean_subtitle.is_empty() || clean_subtitle == name {
+                    format!("{name}（涉及 {files} 个文件变更，+{added}/-{removed} 行）")
+                } else {
+                    format!("{name}：{clean_subtitle}（涉及 {files} 个文件变更，+{added}/-{removed} 行）")
                 };
                 result.push(CollectedEvidence {
                     source_id: source.id,
                     source_type: "cursor".into(),
-                    source_key: format!("cursor:{composer_id}"),
+                    source_key,
                     project: project_for_path(
                         workspace_path.as_deref(),
                         workspaces,
@@ -811,6 +1172,31 @@ async fn collect_cursor(
     Ok(result)
 }
 
+fn cursor_global_dbs(path: &Path) -> Vec<PathBuf> {
+    let mut dbs = Vec::new();
+    let candidates = [
+        path.join("globalStorage/state.vscdb"),
+        path.join("User/globalStorage/state.vscdb"),
+        path.join("state.vscdb"),
+    ];
+    for candidate in candidates {
+        if candidate.is_file() && !dbs.contains(&candidate) {
+            dbs.push(candidate);
+        }
+    }
+    if let Some(parent) = path.parent() {
+        for candidate in [
+            parent.join("globalStorage/state.vscdb"),
+            parent.join("state.vscdb"),
+        ] {
+            if candidate.is_file() && !dbs.contains(&candidate) {
+                dbs.push(candidate);
+            }
+        }
+    }
+    dbs
+}
+
 fn cursor_workspace_roots(path: &Path) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if path.file_name().and_then(|value| value.to_str()) == Some("workspaceStorage")
@@ -826,17 +1212,95 @@ fn cursor_workspace_roots(path: &Path) -> Vec<PathBuf> {
             roots.push(candidate);
         }
     }
+    if let Some(parent) = path.parent() {
+        let sibling = parent.join("workspaceStorage");
+        if sibling.is_dir() && !roots.contains(&sibling) {
+            roots.push(sibling);
+        }
+    }
     roots
+}
+
+fn parse_file_uri_or_path(raw: &str) -> Option<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(url) = url::Url::parse(trimmed) {
+        if let Ok(path) = url.to_file_path() {
+            return Some(path);
+        }
+    }
+    if let Some(stripped) = trimmed.strip_prefix("file://") {
+        return Some(PathBuf::from(stripped));
+    }
+    Some(PathBuf::from(trimmed))
 }
 
 fn cursor_workspace_path(path: &Path) -> Option<PathBuf> {
     let raw = fs::read_to_string(path).ok()?;
     let value: Value = serde_json::from_str(&raw).ok()?;
     let folder = value.get("folder").and_then(Value::as_str)?;
-    url::Url::parse(folder)
-        .ok()
-        .and_then(|url| url.to_file_path().ok())
-        .or_else(|| Some(PathBuf::from(folder)))
+    parse_file_uri_or_path(folder)
+}
+
+fn cursor_composer_workspace_path(
+    composer: &Value,
+    workspace_id: Option<&str>,
+    workspace_roots: &[PathBuf],
+) -> Option<PathBuf> {
+    if let Some(identifier) = composer.get("workspaceIdentifier") {
+        if let Some(uri) = identifier.get("uri") {
+            if let Some(fs_path) = uri.get("fsPath").and_then(Value::as_str) {
+                if let Some(path) = parse_file_uri_or_path(fs_path) {
+                    return Some(path);
+                }
+            }
+            if let Some(p) = uri.get("path").and_then(Value::as_str) {
+                if let Some(path) = parse_file_uri_or_path(p) {
+                    return Some(path);
+                }
+            }
+            if let Some(ext) = uri.get("external").and_then(Value::as_str) {
+                if let Some(path) = parse_file_uri_or_path(ext) {
+                    return Some(path);
+                }
+            }
+            if let Some(raw) = uri.as_str() {
+                if let Some(path) = parse_file_uri_or_path(raw) {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    if let Some(repos) = composer.get("trackedGitRepos").and_then(Value::as_array) {
+        for repo in repos {
+            if let Some(repo_path) = repo.get("repoPath").and_then(Value::as_str) {
+                if let Some(path) = parse_file_uri_or_path(repo_path) {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    let target_wid = workspace_id.or_else(|| {
+        composer
+            .get("workspaceIdentifier")
+            .and_then(|id| id.get("id"))
+            .and_then(Value::as_str)
+    });
+    if let Some(wid) = target_wid {
+        if wid != "empty-window" {
+            for root in workspace_roots {
+                let candidate = root.join(wid).join("workspace.json");
+                if candidate.is_file() {
+                    if let Some(path) = cursor_workspace_path(&candidate) {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 fn collect_files(path: &Path, extension: &str, output: &mut Vec<PathBuf>) -> AppResult<()> {
@@ -881,18 +1345,21 @@ fn record_timestamp(value: &Value) -> Option<DateTime<Utc>> {
         })
 }
 
+fn timestamp_from_millis(value: i64) -> Option<DateTime<Utc>> {
+    if value.abs() < 100_000_000_000 {
+        DateTime::<Utc>::from_timestamp(value, 0)
+    } else {
+        DateTime::<Utc>::from_timestamp_millis(value)
+    }
+}
+
 fn json_timestamp(value: &Value) -> Option<DateTime<Utc>> {
     if let Some(value) = value.as_str() {
         return DateTime::parse_from_rfc3339(value)
             .ok()
             .map(|value| value.with_timezone(&Utc));
     }
-    let value = value.as_i64()?;
-    if value.abs() < 100_000_000_000 {
-        DateTime::<Utc>::from_timestamp(value, 0)
-    } else {
-        DateTime::<Utc>::from_timestamp_millis(value)
-    }
+    value.as_i64().and_then(timestamp_from_millis)
 }
 
 fn project_for_path(
@@ -916,6 +1383,53 @@ fn project_for_path(
         .unwrap_or_else(|| fallback.to_string())
 }
 
+fn clean_summary_for_display(summary: &str) -> String {
+    let mut text = summary.trim();
+    // Strip leading [repo-name] if present
+    if text.starts_with('[') {
+        if let Some(pos) = text.find(']') {
+            text = text[pos + 1..].trim();
+        }
+    }
+    // Strip conventional commit type but keep scope (e.g. docs(V3.20.2): -> (V3.20.2): )
+    let raw_prefixes = ["feat", "fix", "docs", "chore", "refactor", "style", "perf", "test", "merge"];
+    for prefix in raw_prefixes {
+        if text.starts_with(&format!("{prefix}:")) {
+            text = text[prefix.len() + 1..].trim();
+            break;
+        } else if text.starts_with(&format!("{prefix}(")) {
+            text = text[prefix.len()..].trim();
+            break;
+        }
+    }
+    // Strip trailing file / line stats like "（涉及 2 个文件，+44/-33 行：...）"
+    if let Some(pos) = text.rfind("（涉及 ") {
+        text = text[..pos].trim();
+    }
+    // Clean up cursor session subtitle file listings like "：Edited ..."
+    if let Some(pos) = text.find("：Edited ") {
+        text = text[..pos].trim();
+    }
+    if let Some(pos) = text.find("：Read ") {
+        text = text[..pos].trim();
+    }
+    // Strip out git trailers like Co-authored-by
+    let mut cleaned_parts = Vec::new();
+    for part in text.split(" — ") {
+        let p = part.trim();
+        let lower = p.to_ascii_lowercase();
+        if lower.starts_with("co-authored-by:")
+            || lower.starts_with("signed-off-by:")
+            || lower.starts_with("change-id:")
+            || lower.starts_with("reviewed-by:")
+        {
+            continue;
+        }
+        cleaned_parts.push(p);
+    }
+    cleaned_parts.join(" — ")
+}
+
 fn evidence_prompt(evidence: &[ActivityEvidence]) -> String {
     let mut grouped: BTreeMap<&str, Vec<&ActivityEvidence>> = BTreeMap::new();
     for item in evidence {
@@ -925,13 +1439,23 @@ fn evidence_prompt(evidence: &[ActivityEvidence]) -> String {
     for (project, items) in grouped {
         output.push_str(&format!("## {project}\n"));
         for item in items {
+            let clean = clean_summary_for_display(&item.summary);
+            if clean.is_empty() {
+                continue;
+            }
+            let repo_tag = serde_json::from_str::<Value>(&item.metadata_json)
+                .ok()
+                .and_then(|v| v.get("repo").and_then(Value::as_str).map(String::from))
+                .filter(|r| !r.is_empty())
+                .map(|r| format!("[{r}] "))
+                .unwrap_or_default();
             let kind = match item.source_type.as_str() {
-                "git" => "Git 提交",
-                "codex" => "Codex 完成会话",
-                "cursor" => "Cursor 完成会话",
-                _ => "完成事项",
+                "git" => "代码提交",
+                "codex" => "开发任务",
+                "cursor" => "开发任务",
+                _ => "开发活动",
             };
-            output.push_str(&format!("- [{kind}] {}\n", item.summary));
+            output.push_str(&format!("- [{kind}] {repo_tag}{clean}\n"));
             if output.len() >= MAX_LLM_INPUT_BYTES {
                 return truncate_utf8_bytes(&output, MAX_LLM_INPUT_BYTES);
             }
@@ -941,11 +1465,111 @@ fn evidence_prompt(evidence: &[ActivityEvidence]) -> String {
 }
 
 fn fallback_summary(date: NaiveDate, evidence: &[ActivityEvidence]) -> DailyWorkSummary {
-    let progress = evidence_prompt(evidence);
+    let mut by_project: BTreeMap<&str, BTreeMap<String, Vec<String>>> = BTreeMap::new();
+    let mut detected_version = None;
+    let mut detected_topic = None;
+
+    let has_git_commits = evidence.iter().any(|e| e.source_type == "git");
+
+    for item in evidence {
+        if detected_version.is_none() {
+            if let Some(pos) = item.summary.find("V3.") {
+                let slice = &item.summary[pos..];
+                let v = slice
+                    .split(|c: char| !c.is_alphanumeric() && c != '.')
+                    .next()
+                    .unwrap_or("");
+                if v.len() >= 4 {
+                    detected_version = Some(v.to_string());
+                }
+            }
+        }
+        if detected_topic.is_none() {
+            if item.summary.contains("5G消息")
+                || item.summary.contains("5gmc")
+                || item.summary.to_lowercase().contains("5g message")
+            {
+                detected_topic = Some("5G消息模板".to_string());
+            }
+        }
+
+        // If we already have git commits, skip cursor session slugs like "5G message template migration:fix"
+        if has_git_commits && item.source_type == "cursor" {
+            let lower = item.summary.to_lowercase();
+            if lower.contains("migration:")
+                || lower.starts_with("untitled-")
+                || lower.chars().all(|c| c.is_ascii())
+            {
+                continue;
+            }
+        }
+
+        let repo_name = serde_json::from_str::<Value>(&item.metadata_json)
+            .ok()
+            .and_then(|v| v.get("repo").and_then(Value::as_str).map(String::from))
+            .filter(|r| !r.is_empty())
+            .unwrap_or_else(|| {
+                if item.source_type == "cursor" {
+                    "开发任务".to_string()
+                } else {
+                    item.project.clone()
+                }
+            });
+
+        let desc = clean_summary_for_display(&item.summary);
+        if !desc.is_empty() {
+            by_project
+                .entry(&item.project)
+                .or_default()
+                .entry(repo_name)
+                .or_default()
+                .push(desc);
+        }
+    }
+
+    let mut progress_lines = Vec::new();
+    let mut item_idx = 1;
+    for (project, modules) in by_project {
+        for (module, items) in modules {
+            let unique_items = items
+                .into_iter()
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let details = unique_items.join("；");
+            if module == *project || module == "开发任务" {
+                progress_lines.push(format!("{item_idx}、{details}"));
+            } else {
+                let friendly_name = match module.as_str() {
+                    "biz-5gmc-edit-web" => "5G消息前端编辑器",
+                    "biz-template-cloud" => "模板服务端与状态流转",
+                    "biz-ai-pm" => "产品设计与验收文档",
+                    "biz-bjzt-cloud" => "智推微服务",
+                    other => other,
+                };
+                progress_lines.push(format!("{item_idx}、【{friendly_name}】{details}"));
+            }
+            item_idx += 1;
+        }
+    }
+
+    let progress = if progress_lines.is_empty() {
+        evidence_prompt(evidence)
+    } else {
+        progress_lines.join("\n")
+    };
+
+    let task = match (detected_version, detected_topic) {
+        (Some(v), Some(t)) => format!("{v} {t} 研发进展"),
+        (Some(v), None) => format!("{v} 业务功能研发进展"),
+        (None, Some(t)) => format!("{t} 业务功能研发进展"),
+        (None, None) => format!("{date} 核心业务功能研发"),
+    };
+
     DailyWorkSummary {
-        task: format!("{date} 完成事项自动汇总"),
+        task,
         progress,
-        result: Some(format!("共记录 {} 项已完成事项。", evidence.len())),
+        result: Some(format!("共完成 {} 项模块功能与接口提交验收。", evidence.len())),
         blockers: None,
     }
 }
@@ -1305,8 +1929,8 @@ mod tests {
             updated_at: "2026-09-17T10:00:00Z".into(),
         }];
         let summary = fallback_summary(NaiveDate::from_ymd_opt(2026, 9, 17).unwrap(), &evidence);
-        assert!(summary.progress.contains("## Worklog"));
         assert!(summary.progress.contains("完成自动采集"));
+        assert!(summary.task.contains("研发"));
     }
 
     #[test]
@@ -1413,6 +2037,54 @@ mod tests {
     }
 
     #[test]
+    fn git_collects_across_multi_repo_workspace() {
+        let workspace = test_directory("git-workspace");
+        let repo_a = workspace.join("biz-a");
+        let repo_b = workspace.join("biz-b");
+        fs::create_dir_all(&repo_a).unwrap();
+        fs::create_dir_all(&repo_b).unwrap();
+
+        for (repo, file, msg) in [
+            (&repo_a, "a.txt", "feat: 完成组件A开发"),
+            (&repo_b, "b.txt", "fix: 修复组件B边界异常"),
+        ] {
+            run_git(repo, &["init"], None);
+            run_git(repo, &["config", "user.name", "Test User"], None);
+            run_git(repo, &["config", "user.email", "me@example.com"], None);
+            run_git(repo, &["config", "commit.gpgsign", "false"], None);
+            run_git(repo, &["checkout", "-b", "main"], None);
+            commit_file(
+                repo,
+                file,
+                "content\n",
+                msg,
+                "2026-09-17T10:00:00+08:00",
+            );
+        }
+
+        let source = ActivitySource {
+            id: 1,
+            source_type: "git".into(),
+            path: workspace.to_string_lossy().to_string(),
+            display_name: "多仓库工作区".into(),
+            enabled: true,
+            discovered: false,
+            last_scanned_at: None,
+            last_error: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+
+        let evidence = collect_git(&source, NaiveDate::from_ymd_opt(2026, 9, 17).unwrap()).unwrap();
+        assert_eq!(evidence.len(), 2);
+        assert!(evidence.iter().all(|e| e.project == "多仓库工作区"));
+        assert!(evidence.iter().any(|e| e.summary.contains("[biz-a] feat: 完成组件A开发")));
+        assert!(evidence.iter().any(|e| e.summary.contains("[biz-b] fix: 修复组件B边界异常")));
+
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
     fn codex_requires_task_complete_and_only_keeps_final_answer() {
         let root = test_directory("codex");
         let sessions = root.join("sessions/2026/09/17");
@@ -1508,6 +2180,184 @@ mod tests {
         assert_eq!(evidence[0].project, "Cursor 项目");
         assert!(evidence[0].summary.contains("+42/-7"));
         assert_eq!(evidence[0].source_key, "cursor:done");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cursor_collects_from_composer_headers_and_resolves_workspace() {
+        let root = test_directory("cursor-global");
+        let global_storage = root.join("User/globalStorage");
+        let workspace_storage = root.join("User/workspaceStorage/workspace-hash");
+        let project_dir = root.join("project-b");
+        fs::create_dir_all(&global_storage).unwrap();
+        fs::create_dir_all(&workspace_storage).unwrap();
+        fs::create_dir_all(&project_dir).unwrap();
+
+        fs::write(
+            workspace_storage.join("workspace.json"),
+            json!({"folder": url::Url::from_directory_path(&project_dir).unwrap().to_string()})
+                .to_string(),
+        )
+        .unwrap();
+
+        let database_path = global_storage.join("state.vscdb");
+        let options = SqliteConnectOptions::new()
+            .filename(&database_path)
+            .create_if_missing(true);
+        let mut connection = SqliteConnection::connect_with(&options).await.unwrap();
+
+        sqlx::query(
+            "CREATE TABLE composerHeaders (
+                composerId TEXT PRIMARY KEY,
+                workspaceId TEXT,
+                createdAt INTEGER,
+                lastUpdatedAt INTEGER,
+                isArchived INTEGER,
+                isSubagent INTEGER,
+                recency INTEGER,
+                checkpointAt INTEGER,
+                value TEXT,
+                subagentTypeName TEXT
+            )",
+        )
+        .execute(&mut connection)
+        .await
+        .unwrap();
+
+        // 1. Valid completed session with workspaceId mapping
+        let val1 = json!({
+            "composerId": "comp-1",
+            "name": "重构 Cursor 采集",
+            "subtitle": "支持 composerHeaders 表",
+            "isDraft": false,
+            "hasBlockingPendingActions": false,
+            "lastUpdatedAt": 1789610400000_i64,
+            "filesChangedCount": 5,
+            "totalLinesAdded": 120,
+            "totalLinesRemoved": 15,
+            "workspaceIdentifier": {"id": "workspace-hash"}
+        });
+        sqlx::query(
+            "INSERT INTO composerHeaders (composerId, workspaceId, createdAt, lastUpdatedAt, isArchived, isSubagent, value)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("comp-1")
+        .bind("workspace-hash")
+        .bind(1789610400000_i64)
+        .bind(1789610400000_i64)
+        .bind(0)
+        .bind(0)
+        .bind(val1.to_string())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+
+        // 2. Draft session (should be skipped)
+        let val2 = json!({
+            "composerId": "comp-draft",
+            "name": "草稿任务",
+            "isDraft": true,
+            "lastUpdatedAt": 1789610400000_i64
+        });
+        sqlx::query(
+            "INSERT INTO composerHeaders (composerId, workspaceId, createdAt, lastUpdatedAt, isArchived, isSubagent, value)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("comp-draft")
+        .bind("workspace-hash")
+        .bind(1789610400000_i64)
+        .bind(1789610400000_i64)
+        .bind(0)
+        .bind(0)
+        .bind(val2.to_string())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+
+        // 3. Subagent session (should be skipped)
+        let val3 = json!({
+            "composerId": "comp-subagent",
+            "name": "内部探索子任务",
+            "isDraft": false,
+            "lastUpdatedAt": 1789610400000_i64,
+            "isSubagent": true
+        });
+        sqlx::query(
+            "INSERT INTO composerHeaders (composerId, workspaceId, createdAt, lastUpdatedAt, isArchived, isSubagent, value)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("comp-subagent")
+        .bind("workspace-hash")
+        .bind(1789610400000_i64)
+        .bind(1789610400000_i64)
+        .bind(0)
+        .bind(1)
+        .bind(val3.to_string())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+
+        // 4. Session with direct workspaceIdentifier fsPath
+        let project_c = root.join("project-c");
+        fs::create_dir_all(&project_c).unwrap();
+        let val4 = json!({
+            "composerId": "comp-direct",
+            "name": "直接指定路径会话",
+            "isDraft": false,
+            "lastUpdatedAt": 1789610500000_i64,
+            "filesChangedCount": 2,
+            "totalLinesAdded": 30,
+            "totalLinesRemoved": 5,
+            "workspaceIdentifier": {
+                "uri": {"fsPath": project_c.to_string_lossy().to_string()}
+            }
+        });
+        sqlx::query(
+            "INSERT INTO composerHeaders (composerId, workspaceId, createdAt, lastUpdatedAt, isArchived, isSubagent, value)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("comp-direct")
+        .bind("workspace-direct")
+        .bind(1789610500000_i64)
+        .bind(1789610500000_i64)
+        .bind(0)
+        .bind(0)
+        .bind(val4.to_string())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+
+        connection.close().await.unwrap();
+
+        let source = ActivitySource {
+            id: 10,
+            source_type: "cursor".into(),
+            path: root.join("User").to_string_lossy().to_string(),
+            display_name: "Cursor".into(),
+            enabled: true,
+            discovered: true,
+            last_scanned_at: None,
+            last_error: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+
+        let evidence = collect_cursor(
+            &source,
+            NaiveDate::from_ymd_opt(2026, 9, 17).unwrap(),
+            &[(project_dir, "Project B".into()), (project_c, "Project C".into())],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(evidence.len(), 2);
+        assert_eq!(evidence[0].source_key, "cursor:comp-1");
+        assert_eq!(evidence[0].project, "Project B");
+        assert!(evidence[0].summary.contains("+120/-15"));
+        assert_eq!(evidence[1].source_key, "cursor:comp-direct");
+        assert_eq!(evidence[1].project, "Project C");
+        assert!(evidence[1].summary.contains("+30/-5"));
+
         fs::remove_dir_all(root).unwrap();
     }
 
