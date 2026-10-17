@@ -560,6 +560,11 @@ fn provider_defaults(provider: &str) -> AppResult<(&'static str, &'static str, i
         )),
         "openrouter" => Ok(("https://openrouter.ai/api/v1", "openai/gpt-4.1-mini", 60)),
         "minimax" => Ok(("https://api.minimax.cn/v1", "MiniMax-M3", 180)),
+        "bailian" | "dashscope" | "aliyun" => Ok((
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "qwen-plus",
+            60,
+        )),
         _ => Err(AppError::validation("provider", "Unsupported LLM provider")),
     }
 }
@@ -1376,6 +1381,14 @@ mod tests {
         assert_eq!(
             provider_defaults("minimax").unwrap(),
             ("https://api.minimax.cn/v1", "MiniMax-M3", 180)
+        );
+        assert_eq!(
+            provider_defaults("bailian").unwrap(),
+            (
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "qwen-plus",
+                60
+            )
         );
         assert!(provider_defaults("unsupported").is_err());
     }

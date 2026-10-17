@@ -647,6 +647,43 @@ mod tests {
     }
 
     #[test]
+    fn bailian_uses_openai_compatible_chat_request() {
+        let config = LlmConfig {
+            provider: "bailian".into(),
+            base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".into(),
+            model: "qwen-plus".into(),
+            api_key: "bailian-secret".into(),
+            extra_headers: BTreeMap::new(),
+            timeout_seconds: 60,
+        };
+        let client = Client::builder()
+            .timeout(Duration::from_secs(config.timeout_seconds as u64))
+            .build()
+            .unwrap();
+        let request = build_chat_request(
+            &client,
+            &config,
+            &json!({
+                "model": config.model,
+                "messages": [{"role":"user","content":"test"}]
+            }),
+        )
+        .unwrap();
+        assert_eq!(request.method(), reqwest::Method::POST);
+        assert_eq!(
+            request.url().as_str(),
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+        );
+        assert_eq!(
+            request.headers()[reqwest::header::AUTHORIZATION],
+            "Bearer bailian-secret"
+        );
+        let body = request.body().and_then(reqwest::Body::as_bytes).unwrap();
+        let body: Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(body["model"], "qwen-plus");
+    }
+
+    #[test]
     fn parses_daily_summary_with_array_and_string_fields() {
         let json_arr = r#"{
             "task": "V3.20.2 5G消息模板（发送换号 + 真实验收）",

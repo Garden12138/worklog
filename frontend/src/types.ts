@@ -1,6 +1,6 @@
 export type ReportType = "weekly_report" | "monthly_report" | "performance_review";
 export type Priority = "low" | "medium" | "high" | "urgent";
-export type Provider = "openai" | "nvidia" | "openrouter" | "minimax";
+export type Provider = "openai" | "nvidia" | "openrouter" | "minimax" | "bailian";
 export type ActivitySourceType = "git" | "codex" | "cursor";
 export type EmailSecurity = "starttls" | "ssl";
 export type EmailDeliveryStatus = "pending" | "sent" | "failed";

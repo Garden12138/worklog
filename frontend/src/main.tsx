@@ -2,9 +2,11 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import {
   CalendarDays,
+  Check,
   CheckCircle2,
   CircleAlert,
   ClipboardList,
+  Copy,
   Download,
   FileText,
   FolderPlus,
@@ -60,14 +62,16 @@ const providerLabels: Record<Provider, string> = {
   openai: "OpenAI",
   nvidia: "NVIDIA",
   openrouter: "OpenRouter",
-  minimax: "MiniMax"
+  minimax: "MiniMax",
+  bailian: "阿里云百炼"
 };
 
 const providerDefaults: Record<Provider, { base_url: string; model: string; timeout_seconds: number }> = {
   openai: { base_url: "https://api.openai.com/v1", model: "gpt-4.1-mini", timeout_seconds: 60 },
   nvidia: { base_url: "https://integrate.api.nvidia.com/v1", model: "meta/llama-3.1-70b-instruct", timeout_seconds: 180 },
   openrouter: { base_url: "https://openrouter.ai/api/v1", model: "openai/gpt-4.1-mini", timeout_seconds: 60 },
-  minimax: { base_url: "https://api.minimax.cn/v1", model: "MiniMax-M3", timeout_seconds: 180 }
+  minimax: { base_url: "https://api.minimax.cn/v1", model: "MiniMax-M3", timeout_seconds: 180 },
+  bailian: { base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus", timeout_seconds: 60 }
 };
 
 function today() {
@@ -169,6 +173,14 @@ function App() {
   React.useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  React.useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => {
+      setNotice("");
+    }, 3500);
+    return () => clearTimeout(timer);
+  }, [notice]);
 
   async function run(action: () => Promise<void>, success: string, options?: { workLogPage?: number }) {
     setError("");
@@ -272,6 +284,7 @@ function App() {
             }}
             onSendEmail={(id, payload) => run(() => api.sendReportEmail(id, payload).then(() => undefined), "报告邮件已发送")}
             onListEmailDeliveries={(id) => api.listReportEmailDeliveries(id)}
+            onNotice={(message) => setNotice(message)}
           />
         )}
         {tab === "templates" && (
@@ -681,6 +694,7 @@ function ReportsPage(props: {
   onExport: (id: number) => Promise<void>;
   onSendEmail: (id: number, payload: { recipient_ids: number[]; additional_recipients: string[]; subject: string }) => Promise<void>;
   onListEmailDeliveries: (id: number) => Promise<ReportEmailDelivery[]>;
+  onNotice?: (message: string) => void;
 }) {
   const [type, setType] = React.useState<ReportType>("weekly_report");
   const [anchor, setAnchor] = React.useState(today());
@@ -690,6 +704,8 @@ function ReportsPage(props: {
   const [draft, setDraft] = React.useState("");
   const [draftTitle, setDraftTitle] = React.useState("");
   const [viewMode, setViewMode] = React.useState<"edit" | "preview">("edit");
+  const [copied, setCopied] = React.useState(false);
+  const previewRef = React.useRef<HTMLDivElement>(null);
   const [isGenerating, setIsGenerating] = React.useState(false);
   const [showOptimizationDialog, setShowOptimizationDialog] = React.useState(false);
   const [optimizationRequest, setOptimizationRequest] = React.useState("");
@@ -713,7 +729,59 @@ function ReportsPage(props: {
     setShowOptimizationDialog(false);
     setOptimizationRequest("");
     setOptimizationComparison(null);
+    setCopied(false);
   }, [selected?.id]);
+
+  async function handleCopy() {
+    if (!draft.trim()) {
+      props.onNotice?.("草稿内容为空");
+      return;
+    }
+
+    if (viewMode === "edit") {
+      const success = await copyPlainText(draft);
+      if (success) {
+        setCopied(true);
+        props.onNotice?.("已复制原文本到剪贴板");
+        setTimeout(() => setCopied(false), 2000);
+      }
+    } else {
+      if (!previewRef.current) {
+        const success = await copyPlainText(draft);
+        if (success) {
+          setCopied(true);
+          props.onNotice?.("已复制预览内容到剪贴板");
+          setTimeout(() => setCopied(false), 2000);
+        }
+        return;
+      }
+
+      const selection = window.getSelection();
+      let targetElement: HTMLElement = previewRef.current;
+      let isPartialSelection = false;
+
+      if (
+        selection &&
+        !selection.isCollapsed &&
+        selection.rangeCount > 0 &&
+        previewRef.current.contains(selection.anchorNode) &&
+        previewRef.current.contains(selection.focusNode)
+      ) {
+        const range = selection.getRangeAt(0);
+        const container = document.createElement("div");
+        container.appendChild(range.cloneContents());
+        targetElement = container;
+        isPartialSelection = true;
+      }
+
+      const success = await copyPreviewElement(targetElement, previewRef.current);
+      if (success) {
+        setCopied(true);
+        props.onNotice?.(isPartialSelection ? "已复制选中的预览内容" : "已复制预览内容到剪贴板");
+        setTimeout(() => setCopied(false), 2000);
+      }
+    }
+  }
 
   async function generateDraft() {
     if (generationLock.current) {
@@ -938,7 +1006,10 @@ function ReportsPage(props: {
                 <button
                   type="button"
                   className={viewMode === "edit" ? "active" : ""}
-                  onClick={() => setViewMode("edit")}
+                  onClick={() => {
+                    setViewMode("edit");
+                    setCopied(false);
+                  }}
                 >
                   <Pencil size={15} />
                   编辑
@@ -946,7 +1017,10 @@ function ReportsPage(props: {
                 <button
                   type="button"
                   className={viewMode === "preview" ? "active" : ""}
-                  onClick={() => setViewMode("preview")}
+                  onClick={() => {
+                    setViewMode("preview");
+                    setCopied(false);
+                  }}
                 >
                   <FileText size={15} />
                   预览
@@ -961,6 +1035,24 @@ function ReportsPage(props: {
               >
                 <Sparkles size={16} />
                 AI 优化
+              </button>
+              <button
+                className={copied ? "icon-button success" : "icon-button"}
+                type="button"
+                title={
+                  copied
+                    ? (viewMode === "edit" ? "已复制原文本" : "已复制预览内容")
+                    : (viewMode === "edit" ? "复制原文本" : "复制预览内容")
+                }
+                aria-label={
+                  copied
+                    ? (viewMode === "edit" ? "已复制原文本" : "已复制预览内容")
+                    : (viewMode === "edit" ? "复制原文本" : "复制预览内容")
+                }
+                disabled={!draft.trim()}
+                onClick={() => void handleCopy()}
+              >
+                {copied ? <Check size={18} /> : <Copy size={18} />}
               </button>
               <button className="icon-button" type="button" title="导出 DOCX" aria-label="导出 DOCX" onClick={() => void props.onExport(selected.id)}>
                 <Download size={18} />
@@ -999,7 +1091,7 @@ function ReportsPage(props: {
               </div>
             ) : (
               <div className="editor-body">
-                <MarkdownPreview content={draft} />
+                <MarkdownPreview content={draft} previewRef={previewRef} onNotice={props.onNotice} />
               </div>
             )}
           </section>
@@ -1181,7 +1273,36 @@ function ReportsPage(props: {
   );
 }
 
-function MarkdownPreview(props: { content: string }) {
+function isMarkdownTableStart(lines: string[], index: number) {
+  return isMarkdownTableRow(lines[index]) && isMarkdownTableDivider(lines[index + 1] ?? "");
+}
+
+function isMarkdownTableRow(line: string) {
+  const trimmed = line.trim();
+  return trimmed.includes("|") && splitMarkdownTableRow(trimmed).length >= 2;
+}
+
+function isMarkdownTableDivider(line: string) {
+  const cells = splitMarkdownTableRow(line);
+  return cells.length >= 2 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
+}
+
+function splitMarkdownTableRow(row: string): string[] {
+  let trimmed = row.trim();
+  if (trimmed.startsWith("|")) {
+    trimmed = trimmed.slice(1);
+  }
+  if (trimmed.endsWith("|")) {
+    trimmed = trimmed.slice(0, -1);
+  }
+  return trimmed.split("|").map((cell) => cell.trim());
+}
+
+function MarkdownPreview(props: {
+  content: string;
+  previewRef?: React.RefObject<HTMLDivElement>;
+  onNotice?: (msg: string) => void;
+}) {
   const lines = props.content.split(/\r?\n/);
   const blocks: React.ReactNode[] = [];
   let listItems: string[] = [];
@@ -1251,7 +1372,13 @@ function MarkdownPreview(props: { content: string }) {
         tableRows.push(lines[index].trim());
         index += 1;
       }
-      blocks.push(renderMarkdownTable(tableRows, `table-${blocks.length}`));
+      blocks.push(
+        <MarkdownTable
+          key={`table-${blocks.length}`}
+          rows={tableRows}
+          onNotice={props.onNotice}
+        />
+      );
       continue;
     }
 
@@ -1303,44 +1430,71 @@ function MarkdownPreview(props: { content: string }) {
   flushList();
   flushCode();
 
+  function handlePreviewCopy(event: React.ClipboardEvent<HTMLDivElement>) {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed) {
+      return;
+    }
+    const range = selection.getRangeAt(0);
+    const container = document.createElement("div");
+    container.appendChild(range.cloneContents());
+
+    if (!container.textContent && !container.querySelector("table, img")) {
+      return;
+    }
+
+    const html = buildPreviewHtml(container);
+    const text = buildPreviewPlainText(container);
+
+    event.clipboardData.setData("text/html", html);
+    event.clipboardData.setData("text/plain", text);
+    event.preventDefault();
+    props.onNotice?.("已复制选中的预览内容");
+  }
+
   return (
-    <div className="markdown-preview">
+    <div
+      ref={props.previewRef}
+      className="markdown-preview"
+      onCopy={handlePreviewCopy}
+    >
       {blocks.length ? blocks : <p className="empty">暂无预览内容。</p>}
     </div>
   );
 }
 
-function isMarkdownTableStart(lines: string[], index: number) {
-  return isMarkdownTableRow(lines[index]) && isMarkdownTableDivider(lines[index + 1] ?? "");
-}
+function MarkdownTable(props: {
+  rows: string[];
+  onNotice?: (msg: string) => void;
+}) {
+  const [copied, setCopied] = React.useState(false);
+  const tableRef = React.useRef<HTMLTableElement>(null);
+  const header = splitMarkdownTableRow(props.rows[0]);
+  const body = props.rows.slice(1).map(splitMarkdownTableRow);
 
-function isMarkdownTableRow(line: string) {
-  const trimmed = line.trim();
-  return trimmed.includes("|") && splitMarkdownTableRow(trimmed).length >= 2;
-}
-
-function isMarkdownTableDivider(line: string) {
-  const cells = splitMarkdownTableRow(line);
-  return cells.length >= 2 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
-}
-
-function splitMarkdownTableRow(row: string) {
-  let trimmed = row.trim();
-  if (trimmed.startsWith("|")) {
-    trimmed = trimmed.slice(1);
+  async function handleCopyTable(event: React.MouseEvent) {
+    event.stopPropagation();
+    if (!tableRef.current) return;
+    const success = await copyTableElement(tableRef.current);
+    if (success) {
+      setCopied(true);
+      props.onNotice?.("已复制表格内容到剪贴板");
+      setTimeout(() => setCopied(false), 2000);
+    }
   }
-  if (trimmed.endsWith("|")) {
-    trimmed = trimmed.slice(0, -1);
-  }
-  return trimmed.split("|").map((cell) => cell.trim());
-}
 
-function renderMarkdownTable(rows: string[], key: string) {
-  const header = splitMarkdownTableRow(rows[0]);
-  const body = rows.slice(1).map(splitMarkdownTableRow);
   return (
-    <div className="markdown-table-wrap" key={key}>
-      <table>
+    <div className="markdown-table-wrap">
+      <button
+        type="button"
+        className={copied ? "table-copy-button copied" : "table-copy-button"}
+        title={copied ? "已复制表格" : "复制此表格"}
+        onClick={handleCopyTable}
+      >
+        {copied ? <Check size={13} /> : <Copy size={13} />}
+        <span>{copied ? "已复制" : "复制表格"}</span>
+      </button>
+      <table ref={tableRef}>
         <thead>
           <tr>
             {header.map((cell, index) => (
@@ -1360,6 +1514,334 @@ function renderMarkdownTable(rows: string[], key: string) {
       </table>
     </div>
   );
+}
+
+function getElementFormattedText(node: Node): string {
+  if (node.nodeType === Node.TEXT_NODE) {
+    return node.textContent || "";
+  }
+  if (node.nodeType === Node.ELEMENT_NODE) {
+    const el = node as HTMLElement;
+    const tag = el.tagName.toLowerCase();
+    if (tag === "br") {
+      return "\n";
+    }
+    let res = "";
+    for (const child of Array.from(el.childNodes)) {
+      res += getElementFormattedText(child);
+    }
+    return res;
+  }
+  return "";
+}
+
+function formatTsvCell(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.includes("\t") || trimmed.includes("\n") || trimmed.includes('"')) {
+    return `"${trimmed.replace(/"/g, '""')}"`;
+  }
+  return trimmed;
+}
+
+function buildTableHtml(table: HTMLTableElement): string {
+  const clone = table.cloneNode(true) as HTMLTableElement;
+  clone.querySelectorAll(".table-copy-button").forEach((el) => el.remove());
+  clone.setAttribute("border", "1");
+  clone.style.borderCollapse = "collapse";
+  clone.style.width = "100%";
+  clone.style.fontSize = "14px";
+  clone.style.fontFamily = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+  clone.style.color = "#333333";
+
+  clone.querySelectorAll<HTMLTableCellElement>("th").forEach((th) => {
+    th.style.border = "1px solid #d0d7de";
+    th.style.padding = "8px 12px";
+    th.style.backgroundColor = "#f6f8fa";
+    th.style.fontWeight = "bold";
+    th.style.textAlign = "left";
+    th.style.verticalAlign = "top";
+  });
+
+  clone.querySelectorAll<HTMLTableCellElement>("td").forEach((td) => {
+    td.style.border = "1px solid #d0d7de";
+    td.style.padding = "8px 12px";
+    td.style.textAlign = "left";
+    td.style.verticalAlign = "top";
+  });
+
+  return clone.outerHTML;
+}
+
+function buildTablePlainText(table: HTMLTableElement): string {
+  const rows: string[] = [];
+  table.querySelectorAll<HTMLTableRowElement>("tr").forEach((tr) => {
+    const cells: string[] = [];
+    tr.querySelectorAll<HTMLTableCellElement>("th, td").forEach((cell) => {
+      cells.push(formatTsvCell(getElementFormattedText(cell)));
+    });
+    rows.push(cells.join("\t"));
+  });
+  return rows.join("\n");
+}
+
+function buildPreviewHtml(element: HTMLElement): string {
+  const clone = element.cloneNode(true) as HTMLElement;
+  clone.querySelectorAll(".table-copy-button").forEach((el) => el.remove());
+
+  clone.querySelectorAll<HTMLTableElement>("table").forEach((table) => {
+    table.setAttribute("border", "1");
+    table.style.borderCollapse = "collapse";
+    table.style.width = "100%";
+    table.style.margin = "12px 0";
+    table.style.fontSize = "14px";
+    table.style.fontFamily = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
+    table.style.color = "#333333";
+  });
+
+  clone.querySelectorAll<HTMLTableCellElement>("th").forEach((th) => {
+    th.style.border = "1px solid #d0d7de";
+    th.style.padding = "8px 12px";
+    th.style.backgroundColor = "#f6f8fa";
+    th.style.fontWeight = "bold";
+    th.style.textAlign = "left";
+    th.style.verticalAlign = "top";
+  });
+
+  clone.querySelectorAll<HTMLTableCellElement>("td").forEach((td) => {
+    td.style.border = "1px solid #d0d7de";
+    td.style.padding = "8px 12px";
+    td.style.textAlign = "left";
+    td.style.verticalAlign = "top";
+  });
+
+  clone.querySelectorAll<HTMLHeadingElement>("h1").forEach((h1) => {
+    h1.style.fontSize = "22px";
+    h1.style.fontWeight = "bold";
+    h1.style.margin = "16px 0 10px";
+    h1.style.color = "#111827";
+  });
+  clone.querySelectorAll<HTMLHeadingElement>("h2").forEach((h2) => {
+    h2.style.fontSize = "18px";
+    h2.style.fontWeight = "bold";
+    h2.style.margin = "20px 0 10px";
+    h2.style.borderTop = "1px solid #edf1f5";
+    h2.style.paddingTop = "14px";
+    h2.style.color = "#111827";
+  });
+  clone.querySelectorAll<HTMLHeadingElement>("h3").forEach((h3) => {
+    h3.style.fontSize = "16px";
+    h3.style.fontWeight = "bold";
+    h3.style.margin = "16px 0 8px";
+    h3.style.color = "#111827";
+  });
+  clone.querySelectorAll<HTMLHeadingElement>("h4").forEach((h4) => {
+    h4.style.fontSize = "14px";
+    h4.style.fontWeight = "bold";
+    h4.style.margin = "12px 0 6px";
+    h4.style.color = "#374151";
+  });
+
+  clone.querySelectorAll<HTMLParagraphElement>("p").forEach((p) => {
+    p.style.fontSize = "14px";
+    p.style.lineHeight = "1.6";
+    p.style.margin = "0 0 12px";
+    p.style.color = "#374151";
+  });
+  clone.querySelectorAll<HTMLElement>("ul, ol").forEach((list) => {
+    list.style.fontSize = "14px";
+    list.style.lineHeight = "1.6";
+    list.style.margin = "0 0 14px";
+    list.style.paddingLeft = "24px";
+    list.style.color = "#374151";
+  });
+  clone.querySelectorAll<HTMLLIElement>("li").forEach((li) => {
+    li.style.marginBottom = "4px";
+  });
+
+  clone.querySelectorAll<HTMLElement>("code").forEach((code) => {
+    if (code.parentElement?.tagName.toLowerCase() !== "pre") {
+      code.style.backgroundColor = "#f0f2f5";
+      code.style.borderRadius = "4px";
+      code.style.padding = "2px 5px";
+      code.style.fontFamily = "SFMono-Regular, Consolas, monospace";
+      code.style.fontSize = "0.9em";
+      code.style.color = "#244b9b";
+    }
+  });
+  clone.querySelectorAll<HTMLPreElement>("pre").forEach((pre) => {
+    pre.style.backgroundColor = "#f6f8fa";
+    pre.style.border = "1px solid #e2e8f1";
+    pre.style.borderRadius = "6px";
+    pre.style.padding = "12px";
+    pre.style.overflow = "auto";
+  });
+
+  return `<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #333333;">${clone.innerHTML}</div>`;
+}
+
+function buildPreviewPlainText(element: HTMLElement): string {
+  const clone = element.cloneNode(true) as HTMLElement;
+  clone.querySelectorAll(".table-copy-button").forEach((el) => el.remove());
+
+  const blocks: string[] = [];
+  for (const child of Array.from(clone.children)) {
+    const tagName = child.tagName.toLowerCase();
+
+    if (child.classList.contains("markdown-table-wrap") || tagName === "table") {
+      const table = tagName === "table" ? (child as HTMLTableElement) : child.querySelector("table");
+      if (table) {
+        blocks.push(buildTablePlainText(table));
+        continue;
+      }
+    }
+
+    if (/^h[1-6]$/.test(tagName)) {
+      const text = getElementFormattedText(child).trim();
+      if (text) {
+        const level = parseInt(tagName.slice(1), 10);
+        blocks.push(`${"#".repeat(level)} ${text}`);
+      }
+      continue;
+    }
+
+    if (tagName === "ul" || tagName === "ol") {
+      const isOl = tagName === "ol";
+      const lis = child.querySelectorAll("li");
+      const listLines: string[] = [];
+      lis.forEach((li, idx) => {
+        const prefix = isOl ? `${idx + 1}. ` : "- ";
+        listLines.push(`${prefix}${getElementFormattedText(li).trim()}`);
+      });
+      if (listLines.length) {
+        blocks.push(listLines.join("\n"));
+      }
+      continue;
+    }
+
+    if (tagName === "pre") {
+      blocks.push(child.textContent || "");
+      continue;
+    }
+
+    const text = getElementFormattedText(child).trim();
+    if (text) {
+      blocks.push(text);
+    }
+  }
+
+  if (blocks.length === 0) {
+    return (clone.textContent || "").trim();
+  }
+
+  return blocks.join("\n\n");
+}
+
+function fallbackCopyText(text: string): boolean {
+  try {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    textarea.style.top = "-9999px";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    const success = document.execCommand("copy");
+    document.body.removeChild(textarea);
+    return success;
+  } catch (err) {
+    console.error("All copy strategies failed", err);
+    return false;
+  }
+}
+
+async function writeClipboard(
+  html: string,
+  plainText: string,
+  fallbackElement?: HTMLElement
+): Promise<boolean> {
+  if (navigator.clipboard && typeof ClipboardItem !== "undefined") {
+    try {
+      const clipboardRecord: Record<string, Blob> = {
+        "text/plain": new Blob([plainText], { type: "text/plain" }),
+      };
+      if (html) {
+        clipboardRecord["text/html"] = new Blob([html], { type: "text/html" });
+      }
+      await navigator.clipboard.write([new ClipboardItem(clipboardRecord)]);
+      return true;
+    } catch (err) {
+      console.warn("navigator.clipboard.write failed, trying selection fallback", err);
+    }
+  }
+
+  if (fallbackElement && html && document.body.contains(fallbackElement)) {
+    try {
+      const selection = window.getSelection();
+      if (selection) {
+        const originalRanges: Range[] = [];
+        for (let i = 0; i < selection.rangeCount; i++) {
+          originalRanges.push(selection.getRangeAt(i));
+        }
+
+        const range = document.createRange();
+        range.selectNodeContents(fallbackElement);
+        selection.removeAllRanges();
+        selection.addRange(range);
+
+        const success = document.execCommand("copy");
+        selection.removeAllRanges();
+        for (const r of originalRanges) {
+          selection.addRange(r);
+        }
+
+        if (success) {
+          return true;
+        }
+      }
+    } catch (err) {
+      console.warn("execCommand fallback failed", err);
+    }
+  }
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try {
+      await navigator.clipboard.writeText(plainText);
+      return true;
+    } catch (err) {
+      console.warn("navigator.clipboard.writeText failed", err);
+    }
+  }
+
+  return fallbackCopyText(plainText);
+}
+
+async function copyPlainText(text: string): Promise<boolean> {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (err) {
+      console.warn("navigator.clipboard.writeText failed, trying fallback", err);
+    }
+  }
+  return fallbackCopyText(text);
+}
+
+async function copyPreviewElement(
+  targetElement: HTMLElement,
+  fallbackElement?: HTMLElement
+): Promise<boolean> {
+  const html = buildPreviewHtml(targetElement);
+  const text = buildPreviewPlainText(targetElement);
+  return writeClipboard(html, text, fallbackElement ?? targetElement);
+}
+
+async function copyTableElement(table: HTMLTableElement): Promise<boolean> {
+  const html = buildTableHtml(table);
+  const text = buildTablePlainText(table);
+  return writeClipboard(html, text, table);
 }
 
 function renderInlineMarkdown(text: string) {
@@ -2210,6 +2692,7 @@ function SettingsPage(props: {
                 <option value="nvidia">NVIDIA</option>
                 <option value="openrouter">OpenRouter</option>
                 <option value="minimax">MiniMax（国内）</option>
+                <option value="bailian">阿里云百炼（国内）</option>
               </select>
             </label>
             <label>
