@@ -984,7 +984,7 @@ async fn collect_cursor(
                     .or_else(|| composer.get("subtitle"))
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                let files = composer
+                let raw_files = composer
                     .get("filesChangedCount")
                     .and_then(Value::as_i64)
                     .unwrap_or(0);
@@ -997,7 +997,28 @@ async fn collect_cursor(
                     .and_then(Value::as_i64)
                     .unwrap_or(0);
 
-                if files == 0 && added == 0 && removed == 0 {
+                let edited_files_count = if let Some(files_str) = subtitle.strip_prefix("Edited ") {
+                    files_str
+                        .split(',')
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                        .count() as i64
+                } else {
+                    0
+                };
+                let files = if raw_files > 0 {
+                    raw_files
+                } else {
+                    edited_files_count
+                };
+
+                let is_edited = subtitle.starts_with("Edited ") || files > 0 || added > 0 || removed > 0;
+                let has_custom_name = raw_name
+                    .map(|n| n != "Cursor 完成会话" && !n.trim().is_empty())
+                    .unwrap_or(false);
+                let is_read_only = subtitle.starts_with("Read ");
+
+                if !is_edited && (!has_custom_name || is_read_only) {
                     continue;
                 }
 
@@ -1006,12 +1027,19 @@ async fn collect_cursor(
                 } else {
                     subtitle
                 };
-                let summary = if name == "Cursor 完成会话" && !clean_subtitle.is_empty() {
-                    format!("{clean_subtitle}（涉及 {files} 个文件变更，+{added}/-{removed} 行）")
-                } else if clean_subtitle.is_empty() || clean_subtitle == name {
-                    format!("{name}（涉及 {files} 个文件变更，+{added}/-{removed} 行）")
+                let stats = if added > 0 || removed > 0 {
+                    format!("（涉及 {files} 个文件变更，+{added}/-{removed} 行）")
+                } else if files > 0 {
+                    format!("（涉及 {files} 个文件变更）")
                 } else {
-                    format!("{name}：{clean_subtitle}（涉及 {files} 个文件变更，+{added}/-{removed} 行）")
+                    String::new()
+                };
+                let summary = if name == "Cursor 完成会话" && !clean_subtitle.is_empty() {
+                    format!("{clean_subtitle}{stats}")
+                } else if clean_subtitle.is_empty() || clean_subtitle == name {
+                    format!("{name}{stats}")
+                } else {
+                    format!("{name}：{clean_subtitle}{stats}")
                 };
 
                 let workspace_id_col: Option<String> = row.try_get("workspaceId").ok();
@@ -1112,16 +1140,14 @@ async fn collect_cursor(
                 if occurred_at < start || occurred_at >= end {
                     continue;
                 }
-                let name = composer
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Cursor 完成会话");
+                let raw_name = composer.get("name").and_then(Value::as_str);
+                let name = raw_name.unwrap_or("Cursor 完成会话");
                 let subtitle = composer
                     .get("summary")
                     .or_else(|| composer.get("subtitle"))
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                let files = composer
+                let raw_files = composer
                     .get("filesChangedCount")
                     .and_then(Value::as_i64)
                     .unwrap_or(0);
@@ -1133,20 +1159,50 @@ async fn collect_cursor(
                     .get("totalLinesRemoved")
                     .and_then(Value::as_i64)
                     .unwrap_or(0);
-                if files == 0 && added == 0 && removed == 0 {
+
+                let edited_files_count = if let Some(files_str) = subtitle.strip_prefix("Edited ") {
+                    files_str
+                        .split(',')
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                        .count() as i64
+                } else {
+                    0
+                };
+                let files = if raw_files > 0 {
+                    raw_files
+                } else {
+                    edited_files_count
+                };
+
+                let is_edited = subtitle.starts_with("Edited ") || files > 0 || added > 0 || removed > 0;
+                let has_custom_name = raw_name
+                    .map(|n| n != "Cursor 完成会话" && !n.trim().is_empty())
+                    .unwrap_or(false);
+                let is_read_only = subtitle.starts_with("Read ");
+
+                if !is_edited && (!has_custom_name || is_read_only) {
                     continue;
                 }
+
                 let clean_subtitle = if subtitle.starts_with("Edited ") || subtitle.starts_with("Read ") {
                     ""
                 } else {
                     subtitle
                 };
-                let summary = if name == "Cursor 完成会话" && !clean_subtitle.is_empty() {
-                    format!("{clean_subtitle}（涉及 {files} 个文件变更，+{added}/-{removed} 行）")
-                } else if clean_subtitle.is_empty() || clean_subtitle == name {
-                    format!("{name}（涉及 {files} 个文件变更，+{added}/-{removed} 行）")
+                let stats = if added > 0 || removed > 0 {
+                    format!("（涉及 {files} 个文件变更，+{added}/-{removed} 行）")
+                } else if files > 0 {
+                    format!("（涉及 {files} 个文件变更）")
                 } else {
-                    format!("{name}：{clean_subtitle}（涉及 {files} 个文件变更，+{added}/-{removed} 行）")
+                    String::new()
+                };
+                let summary = if name == "Cursor 完成会话" && !clean_subtitle.is_empty() {
+                    format!("{clean_subtitle}{stats}")
+                } else if clean_subtitle.is_empty() || clean_subtitle == name {
+                    format!("{name}{stats}")
+                } else {
+                    format!("{name}：{clean_subtitle}{stats}")
                 };
                 result.push(CollectedEvidence {
                     source_id: source.id,
@@ -2327,6 +2383,62 @@ mod tests {
         .await
         .unwrap();
 
+        // 5. Agent session with no line stats but with Edited subtitle
+        let val5 = json!({
+            "composerId": "comp-agent",
+            "name": "Phase S5 task completion",
+            "subtitle": "Edited T4.10.md, v1.0.md",
+            "isDraft": false,
+            "lastUpdatedAt": 1789610600000_i64,
+            "totalLinesAdded": 0,
+            "totalLinesRemoved": 0,
+            "workspaceIdentifier": {
+                "uri": {"fsPath": project_c.to_string_lossy().to_string()}
+            }
+        });
+        sqlx::query(
+            "INSERT INTO composerHeaders (composerId, workspaceId, createdAt, lastUpdatedAt, isArchived, isSubagent, value)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("comp-agent")
+        .bind("workspace-agent")
+        .bind(1789610600000_i64)
+        .bind(1789610600000_i64)
+        .bind(0)
+        .bind(0)
+        .bind(val5.to_string())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+
+        // 6. Read-only session with Read subtitle (should be skipped)
+        let val6 = json!({
+            "composerId": "comp-read-only",
+            "name": "探索会话",
+            "subtitle": "Read a.txt, b.txt",
+            "isDraft": false,
+            "lastUpdatedAt": 1789610700000_i64,
+            "totalLinesAdded": 0,
+            "totalLinesRemoved": 0,
+            "workspaceIdentifier": {
+                "uri": {"fsPath": project_c.to_string_lossy().to_string()}
+            }
+        });
+        sqlx::query(
+            "INSERT INTO composerHeaders (composerId, workspaceId, createdAt, lastUpdatedAt, isArchived, isSubagent, value)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("comp-read-only")
+        .bind("workspace-read")
+        .bind(1789610700000_i64)
+        .bind(1789610700000_i64)
+        .bind(0)
+        .bind(0)
+        .bind(val6.to_string())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+
         connection.close().await.unwrap();
 
         let source = ActivitySource {
@@ -2350,13 +2462,23 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(evidence.len(), 2);
+        assert_eq!(evidence.len(), 3);
         assert_eq!(evidence[0].source_key, "cursor:comp-1");
         assert_eq!(evidence[0].project, "Project B");
         assert!(evidence[0].summary.contains("+120/-15"));
         assert_eq!(evidence[1].source_key, "cursor:comp-direct");
         assert_eq!(evidence[1].project, "Project C");
         assert!(evidence[1].summary.contains("+30/-5"));
+        assert_eq!(evidence[2].source_key, "cursor:comp-agent");
+        assert_eq!(evidence[2].project, "Project C");
+        assert_eq!(
+            evidence[2].summary,
+            "Phase S5 task completion（涉及 2 个文件变更）"
+        );
+        assert_eq!(
+            evidence[2].metadata.get("files_changed").and_then(Value::as_i64),
+            Some(2)
+        );
 
         fs::remove_dir_all(root).unwrap();
     }
