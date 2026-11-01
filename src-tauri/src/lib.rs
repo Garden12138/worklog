@@ -10,6 +10,7 @@ mod reports;
 mod scheduler;
 mod secrets;
 mod templates;
+mod xcli;
 
 use db::Database;
 use reports::ActiveGenerations;
@@ -106,9 +107,13 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_work_logs,
+            commands::list_work_logs_by_date,
+            commands::get_month_work_log_dates,
+            commands::get_work_report_summary,
             commands::create_work_log,
             commands::update_work_log,
             commands::delete_work_log,
+            commands::chat_modify_work_log,
             commands::list_templates,
             commands::create_template,
             commands::update_template,
@@ -125,6 +130,7 @@ pub fn run() {
             commands::send_report_email,
             commands::get_llm_setting,
             commands::list_llm_settings,
+            commands::test_xcli_connection,
             commands::create_llm_setting,
             commands::update_llm_setting,
             commands::apply_llm_setting,

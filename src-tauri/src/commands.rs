@@ -8,6 +8,8 @@ use crate::reports;
 use crate::secrets::{email_secret_key, is_masked, llm_secret_key, mask_secret};
 use crate::templates::validate_template;
 use crate::AppState;
+use chrono::{Datelike, Utc};
+use chrono_tz::Asia::Shanghai;
 use sqlx::{QueryBuilder, Row, Sqlite};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager, State};
@@ -56,6 +58,165 @@ pub async fn list_work_logs(
         page,
         page_size,
         total_pages: ((total + page_size - 1) / page_size).max(1),
+    })
+}
+
+#[tauri::command]
+pub async fn list_work_logs_by_date(
+    state: State<'_, AppState>,
+    date: String,
+) -> AppResult<Vec<WorkLog>> {
+    let items = sqlx::query_as::<_, WorkLog>(
+        "SELECT id, work_date, start_date, end_date, project, task, progress, result, blockers, hours, priority, notes, origin, auto_capture_date, manually_edited, git_commit_count, agent_session_count, pending_evidence_count, created_at, updated_at \
+         FROM work_logs \
+         WHERE start_date = ? OR work_date = ? OR (? BETWEEN start_date AND end_date) \
+         ORDER BY id DESC",
+    )
+    .bind(&date)
+    .bind(&date)
+    .bind(&date)
+    .fetch_all(&state.db.pool)
+    .await?;
+    Ok(items)
+}
+
+#[tauri::command]
+pub async fn get_month_work_log_dates(
+    state: State<'_, AppState>,
+    month: String,
+) -> AppResult<Vec<String>> {
+    let pattern = format!("{}%", month);
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT DISTINCT start_date FROM work_logs WHERE start_date LIKE ? \
+         UNION \
+         SELECT DISTINCT work_date FROM work_logs WHERE work_date LIKE ? \
+         UNION \
+         SELECT DISTINCT end_date FROM work_logs WHERE end_date LIKE ?",
+    )
+    .bind(&pattern)
+    .bind(&pattern)
+    .bind(&pattern)
+    .fetch_all(&state.db.pool)
+    .await?;
+    let dates = rows.into_iter().map(|r| r.0).filter(|d| !d.is_empty()).collect();
+    Ok(dates)
+}
+
+#[tauri::command]
+pub async fn get_work_report_summary(
+    state: State<'_, AppState>,
+    anchor_date: Option<String>,
+) -> AppResult<WorkReportSummary> {
+    let today = if let Some(ref d) = anchor_date {
+        reports::parse_date(d, "anchor_date")?
+    } else {
+        Utc::now().with_timezone(&Shanghai).date_naive()
+    };
+
+    let days_from_monday = today.weekday().num_days_from_monday() as i64;
+    let monday = today - chrono::Duration::days(days_from_monday);
+    let sunday = monday + chrono::Duration::days(6);
+
+    let monday_str = monday.format("%Y-%m-%d").to_string();
+    let sunday_str = sunday.format("%Y-%m-%d").to_string();
+
+    let logs = sqlx::query_as::<_, WorkLog>(
+        "SELECT id, work_date, start_date, end_date, project, task, progress, result, blockers, hours, priority, notes, origin, auto_capture_date, manually_edited, git_commit_count, agent_session_count, pending_evidence_count, created_at, updated_at \
+         FROM work_logs \
+         WHERE (start_date BETWEEN ? AND ?) \
+            OR (end_date BETWEEN ? AND ?) \
+            OR (work_date BETWEEN ? AND ?) \
+            OR (? BETWEEN start_date AND end_date)",
+    )
+    .bind(&monday_str)
+    .bind(&sunday_str)
+    .bind(&monday_str)
+    .bind(&sunday_str)
+    .bind(&monday_str)
+    .bind(&sunday_str)
+    .bind(&monday_str)
+    .fetch_all(&state.db.pool)
+    .await?;
+
+    let day_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+    let mut daily_stats = Vec::new();
+    let mut week_total_hours = 0.0;
+    let mut active_days = 0;
+    let mut total_tasks = 0;
+    let mut project_hours_map: std::collections::HashMap<String, (f64, i64)> = std::collections::HashMap::new();
+
+    for i in 0..7 {
+        let current_date = monday + chrono::Duration::days(i);
+        let current_str = current_date.format("%Y-%m-%d").to_string();
+        let is_today = current_date == today;
+
+        let day_logs: Vec<&WorkLog> = logs
+            .iter()
+            .filter(|l| {
+                l.start_date == current_str
+                    || l.end_date == current_str
+                    || l.work_date == current_str
+                    || (current_str >= l.start_date && current_str <= l.end_date)
+            })
+            .collect();
+
+        let day_hours: f64 = day_logs.iter().map(|l| l.hours.unwrap_or(0.0)).sum();
+        let day_tasks = day_logs.len() as i64;
+
+        if day_hours > 0.0 || day_tasks > 0 {
+            active_days += 1;
+        }
+        week_total_hours += day_hours;
+        total_tasks += day_tasks;
+
+        daily_stats.push(DailyWorkStat {
+            date: current_str,
+            day_name: day_names[i as usize].to_string(),
+            total_hours: (day_hours * 10.0).round() / 10.0,
+            task_count: day_tasks,
+            is_today,
+        });
+    }
+
+    for log in &logs {
+        let h = log.hours.unwrap_or(0.0);
+        let entry = project_hours_map.entry(log.project.clone()).or_insert((0.0, 0));
+        entry.0 += h;
+        entry.1 += 1;
+    }
+
+    let mut top_projects: Vec<ProjectHourStat> = project_hours_map
+        .into_iter()
+        .map(|(project, (hours, count))| {
+            let percentage = if week_total_hours > 0.0 {
+                (hours / week_total_hours * 1000.0).round() / 10.0
+            } else {
+                0.0
+            };
+            ProjectHourStat {
+                project,
+                hours: (hours * 10.0).round() / 10.0,
+                percentage,
+                count,
+            }
+        })
+        .collect();
+
+    top_projects.sort_by(|a, b| b.hours.partial_cmp(&a.hours).unwrap_or(std::cmp::Ordering::Equal));
+
+    let week_avg_hours = if active_days > 0 {
+        ((week_total_hours / active_days as f64) * 10.0).round() / 10.0
+    } else {
+        0.0
+    };
+
+    Ok(WorkReportSummary {
+        week_total_hours: (week_total_hours * 10.0).round() / 10.0,
+        week_avg_hours,
+        active_days,
+        total_tasks,
+        daily_stats,
+        top_projects,
     })
 }
 
@@ -171,6 +332,85 @@ pub async fn delete_work_log(state: State<'_, AppState>, id: i64) -> AppResult<(
         return Err(AppError::not_found("Work log"));
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn chat_modify_work_log(
+    state: State<'_, AppState>,
+    payload: ChatModifyWorkLogInput,
+) -> AppResult<WorkLogDialogueResponse> {
+    if payload.messages.is_empty() {
+        return Err(AppError::validation("messages", "Messages cannot be empty"));
+    }
+    let last_user_msg = payload
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .ok_or_else(|| AppError::validation("messages", "Last message must be from user"))?;
+    if last_user_msg.content.trim().is_empty() {
+        return Err(AppError::validation("messages", "User message cannot be empty"));
+    }
+
+    let config = llm::active_config(&state.db.pool, &state.secrets).await?;
+    let config = llm::require_config(config.as_ref())?;
+
+    let mut target_ids = Vec::new();
+    if let Some(ids) = payload.target_log_ids {
+        for id in ids {
+            if !target_ids.contains(&id) {
+                target_ids.push(id);
+            }
+        }
+    }
+    if let Some(single_id) = payload.target_log_id {
+        if !target_ids.contains(&single_id) {
+            target_ids.push(single_id);
+        }
+    }
+
+    let mut candidates: Vec<WorkLog> = Vec::new();
+
+    for &id in &target_ids {
+        if let Ok(target) = load_work_log(&state, id).await {
+            candidates.push(target);
+        }
+    }
+    if let Some(editing_id) = payload.current_editing_id {
+        if candidates.iter().all(|l| l.id != editing_id) {
+            if let Ok(editing) = load_work_log(&state, editing_id).await {
+                candidates.push(editing);
+            }
+        }
+    }
+
+    let recent = sqlx::query_as::<_, WorkLog>(
+        "SELECT id, work_date, start_date, end_date, project, task, progress, result, blockers, hours, priority, notes, origin, auto_capture_date, manually_edited, git_commit_count, agent_session_count, pending_evidence_count, created_at, updated_at \
+         FROM work_logs ORDER BY start_date DESC, end_date DESC, id DESC LIMIT 30",
+    )
+    .fetch_all(&state.db.pool)
+    .await?;
+
+    for item in recent {
+        if candidates.iter().all(|l| l.id != item.id) {
+            candidates.push(item);
+        }
+    }
+
+    let today = Utc::now()
+        .with_timezone(&Shanghai)
+        .format("%Y-%m-%d")
+        .to_string();
+
+    llm::chat_modify_work_log(
+        config,
+        &today,
+        payload.current_editing_id,
+        &target_ids,
+        &candidates,
+        &payload.messages,
+    )
+    .await
 }
 
 async fn load_work_log(state: &AppState, id: i64) -> AppResult<WorkLog> {
@@ -552,6 +792,7 @@ pub async fn send_report_email(
 
 fn provider_defaults(provider: &str) -> AppResult<(&'static str, &'static str, i64)> {
     match provider {
+        "xcli" => Ok(("http://127.0.0.1:18741/v1", "xcli/text-default", 180)),
         "openai" => Ok(("https://api.openai.com/v1", "gpt-4.1-mini", 60)),
         "nvidia" => Ok((
             "https://integrate.api.nvidia.com/v1",
@@ -624,6 +865,21 @@ pub async fn list_llm_settings(state: State<'_, AppState>) -> AppResult<Vec<LlmS
 }
 
 #[tauri::command]
+pub async fn test_xcli_connection(
+    state: State<'_, AppState>,
+    id: i64,
+) -> AppResult<crate::xcli::ConnectionInfo> {
+    let row = load_llm_row(&state, id).await?;
+    if row.provider != "xcli" {
+        return Err(AppError::validation(
+            "provider",
+            "Select a saved xcli configuration",
+        ));
+    }
+    crate::xcli::probe(&llm::config_from_row(row, &state.secrets)).await
+}
+
+#[tauri::command]
 pub async fn create_llm_setting(
     state: State<'_, AppState>,
     payload: LlmSettingInput,
@@ -633,6 +889,9 @@ pub async fn create_llm_setting(
     let base_url = clean_optional(payload.base_url).unwrap_or(defaults.0.into());
     url::Url::parse(&base_url)
         .map_err(|_| AppError::validation("base_url", "A valid base URL is required"))?;
+    if provider == "xcli" {
+        crate::xcli::validate_endpoint(&base_url)?;
+    }
     let model = require_text(
         Some(clean_optional(payload.model).unwrap_or(defaults.1.into())),
         "model",
@@ -701,6 +960,18 @@ pub async fn update_llm_setting(
     let base_url = clean_optional(payload.base_url).unwrap_or(defaults.0.into());
     url::Url::parse(&base_url)
         .map_err(|_| AppError::validation("base_url", "A valid base URL is required"))?;
+    if payload.provider == "xcli" {
+        crate::xcli::validate_endpoint(&base_url)?;
+    }
+    if current.provider != payload.provider
+        && (current.provider == "xcli" || payload.provider == "xcli")
+        && payload
+            .api_key
+            .as_deref()
+            .is_none_or(|key| key.trim().is_empty() || is_masked(key))
+    {
+        return Err(AppError::validation("api_key", "Switching to or from xcli requires an independent token; create a separate provider configuration"));
+    }
     let model = require_text(
         Some(clean_optional(payload.model).unwrap_or(defaults.1.into())),
         "model",
@@ -1391,5 +1662,32 @@ mod tests {
             )
         );
         assert!(provider_defaults("unsupported").is_err());
+        assert_eq!(
+            provider_defaults("xcli").unwrap(),
+            ("http://127.0.0.1:18741/v1", "xcli/text-default", 180)
+        );
+    }
+
+    #[test]
+    fn validates_chat_modify_work_log_empty_inputs() {
+        let empty_payload = ChatModifyWorkLogInput {
+            messages: vec![],
+            current_editing_id: None,
+            target_log_id: None,
+            target_log_ids: None,
+        };
+        assert!(empty_payload.messages.is_empty());
+        let ws_payload = ChatModifyWorkLogInput {
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content: "   ".into(),
+            }],
+            current_editing_id: None,
+            target_log_id: None,
+            target_log_ids: Some(vec![1, 2]),
+        };
+        let last = ws_payload.messages.last().unwrap();
+        assert!(last.content.trim().is_empty());
+        assert_eq!(ws_payload.target_log_ids.unwrap().len(), 2);
     }
 }

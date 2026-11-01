@@ -23,7 +23,10 @@ import type {
   Template,
   TemplateImportExampleResponse,
   TemplateOptimizeResponse,
-  WorkLog
+  WorkLog,
+  ChatMessage,
+  WorkLogDialogueResponse,
+  WorkReportSummary
 } from "./types";
 
 function asError(error: unknown): Error {
@@ -47,11 +50,23 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
 export const api = {
   listWorkLogs: (page = 1, pageSize = 10) =>
     call<PaginatedWorkLogs>("list_work_logs", { page, pageSize }),
+  listWorkLogsByDate: (date: string) =>
+    call<WorkLog[]>("list_work_logs_by_date", { date }),
+  getMonthWorkLogDates: (month: string) =>
+    call<string[]>("get_month_work_log_dates", { month }),
+  getWorkReportSummary: (anchorDate?: string) =>
+    call<WorkReportSummary>("get_work_report_summary", { anchorDate: anchorDate ?? null }),
   createWorkLog: (payload: Partial<WorkLog>) =>
     call<WorkLog>("create_work_log", { payload }),
   updateWorkLog: (id: number, payload: Partial<WorkLog>) =>
     call<WorkLog>("update_work_log", { id, payload }),
   deleteWorkLog: (id: number) => call<void>("delete_work_log", { id }),
+  chatModifyWorkLog: (payload: {
+    messages: ChatMessage[];
+    current_editing_id?: number | null;
+    target_log_id?: number | null;
+    target_log_ids?: number[] | null;
+  }) => call<WorkLogDialogueResponse>("chat_modify_work_log", { payload }),
 
   listTemplates: (templateType?: ReportType) =>
     call<Template[]>("list_templates", { templateType: templateType ?? null }),
@@ -105,6 +120,7 @@ export const api = {
 
   getLlmSetting: () => call<LlmSetting | null>("get_llm_setting"),
   listLlmSettings: () => call<LlmSetting[]>("list_llm_settings"),
+  testXcliConnection: (id: number) => call<{ model: string; inference_location: "local" | "remote" | "unknown" }>("test_xcli_connection", { id }),
   createLlmSetting: (payload: LlmSetting) =>
     call<LlmSetting>("create_llm_setting", { payload }),
   updateLlmSetting: (id: number, payload: LlmSetting) =>

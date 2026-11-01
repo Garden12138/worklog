@@ -1,27 +1,47 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import {
+  Activity,
+  ArrowRight,
+  Award,
+  Bot,
   CalendarDays,
   Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   CircleAlert,
   ClipboardList,
+  Clock,
   Copy,
+  Cpu,
+  Database,
   Download,
   FileText,
+  Flame,
   FolderPlus,
   LoaderCircle,
   Mail,
+  MessageSquare,
   NotebookTabs,
   Pencil,
+  PieChart,
   Play,
   Plus,
+  Radio,
   RefreshCw,
+  RotateCcw,
   Save,
   Send,
   Settings,
+  ShieldCheck,
   Sparkles,
+  Square,
+  Target,
   Trash2,
+  TrendingUp,
+  Users,
   X
 } from "lucide-react";
 
@@ -31,10 +51,12 @@ import type {
   ActivitySource,
   ActivitySourceCandidate,
   ActivitySourceType,
+  ChatMessage,
   DailyCaptureRun,
   DailyCaptureSettings,
   DesktopPreferences,
   EmailSetting,
+  FieldChange,
   LlmSetting,
   MigrationResult,
   Priority,
@@ -46,7 +68,11 @@ import type {
   ReportType,
   ScheduleWeekday,
   Template,
-  WorkLog
+  WorkLog,
+  WorkLogDialogueResponse,
+  WorkLogModificationAction,
+  DailyWorkStat,
+  WorkReportSummary
 } from "./types";
 import "./styles.css";
 
@@ -59,6 +85,7 @@ const reportLabels: Record<ReportType, string> = {
 };
 
 const providerLabels: Record<Provider, string> = {
+  xcli: "xcli 本机网关（推理位置取决于上游）",
   openai: "OpenAI",
   nvidia: "NVIDIA",
   openrouter: "OpenRouter",
@@ -67,6 +94,7 @@ const providerLabels: Record<Provider, string> = {
 };
 
 const providerDefaults: Record<Provider, { base_url: string; model: string; timeout_seconds: number }> = {
+  xcli: { base_url: "http://127.0.0.1:18741/v1", model: "xcli/text-default", timeout_seconds: 180 },
   openai: { base_url: "https://api.openai.com/v1", model: "gpt-4.1-mini", timeout_seconds: 60 },
   nvidia: { base_url: "https://integrate.api.nvidia.com/v1", model: "meta/llama-3.1-70b-instruct", timeout_seconds: 180 },
   openrouter: { base_url: "https://openrouter.ai/api/v1", model: "openai/gpt-4.1-mini", timeout_seconds: 60 },
@@ -83,6 +111,790 @@ function today() {
   }).formatToParts(new Date());
   const value = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   return `${value.year}-${value.month}-${value.day}`;
+}
+
+interface CalendarDay {
+  dateStr: string;
+  dayNumber: number;
+  isCurrentMonth: boolean;
+  isToday: boolean;
+}
+
+function getCalendarGrid(year: number, month: number, todayStr: string): CalendarDay[] {
+  const firstDayOfMonth = new Date(year, month - 1, 1);
+  const totalDaysInMonth = new Date(year, month, 0).getDate();
+  const startDayOfWeek = (firstDayOfMonth.getDay() + 6) % 7;
+  const prevMonthTotalDays = new Date(year, month - 1, 0).getDate();
+
+  const days: CalendarDay[] = [];
+
+  // Previous month padding
+  for (let i = startDayOfWeek - 1; i >= 0; i--) {
+    const day = prevMonthTotalDays - i;
+    const prevMonth = month === 1 ? 12 : month - 1;
+    const prevYear = month === 1 ? year - 1 : year;
+    const dateStr = `${prevYear}-${String(prevMonth).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    days.push({
+      dateStr,
+      dayNumber: day,
+      isCurrentMonth: false,
+      isToday: dateStr === todayStr
+    });
+  }
+
+  // Current month
+  for (let day = 1; day <= totalDaysInMonth; day++) {
+    const dateStr = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    days.push({
+      dateStr,
+      dayNumber: day,
+      isCurrentMonth: true,
+      isToday: dateStr === todayStr
+    });
+  }
+
+  // Next month padding to fill row
+  const remaining = (7 - (days.length % 7)) % 7;
+  for (let day = 1; day <= remaining; day++) {
+    const nextMonth = month === 12 ? 1 : month + 1;
+    const nextYear = month === 12 ? year + 1 : year;
+    const dateStr = `${nextYear}-${String(nextMonth).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    days.push({
+      dateStr,
+      dayNumber: day,
+      isCurrentMonth: false,
+      isToday: dateStr === todayStr
+    });
+  }
+
+  return days;
+}
+
+function SidebarClockAndCalendar(props: {
+  todayStr: string;
+  todayCount: number;
+  todayHours: number;
+  onOpenToday: () => void;
+  onSelectDate: (date: string) => void;
+  refreshTrigger: number;
+}) {
+  const [now, setNow] = React.useState(() => new Date());
+  const [viewYear, setViewYear] = React.useState(() => {
+    const parts = props.todayStr.split("-");
+    return Number(parts[0]) || new Date().getFullYear();
+  });
+  const [viewMonth, setViewMonth] = React.useState(() => {
+    const parts = props.todayStr.split("-");
+    return Number(parts[1]) || (new Date().getMonth() + 1);
+  });
+  const [activeDates, setActiveDates] = React.useState<Set<string>>(new Set());
+
+  // Real-time ticking every second
+  React.useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Fetch dates that have logs for viewYear-viewMonth
+  React.useEffect(() => {
+    let cancelled = false;
+    const monthStr = `${viewYear}-${String(viewMonth).padStart(2, "0")}`;
+    api
+      .getMonthWorkLogDates(monthStr)
+      .then((dates) => {
+        if (!cancelled) setActiveDates(new Set(dates));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [viewYear, viewMonth, props.refreshTrigger]);
+
+  const timeStr = React.useMemo(() => {
+    return now.toTimeString().slice(0, 8); // "HH:mm:ss"
+  }, [now]);
+
+  const [hoursMin, sec] = React.useMemo(() => {
+    const parts = timeStr.split(":");
+    return [`${parts[0]}:${parts[1]}`, parts[2] || "00"];
+  }, [timeStr]);
+
+  const calendarDays = React.useMemo(() => {
+    return getCalendarGrid(viewYear, viewMonth, props.todayStr);
+  }, [viewYear, viewMonth, props.todayStr]);
+
+  const todayYear = Number(props.todayStr.split("-")[0]) || new Date().getFullYear();
+  const todayMonth = Number(props.todayStr.split("-")[1]) || (new Date().getMonth() + 1);
+  const isViewingOtherMonth = viewYear !== todayYear || viewMonth !== todayMonth;
+
+  function prevMonth() {
+    if (viewMonth === 1) {
+      setViewYear((y) => y - 1);
+      setViewMonth(12);
+    } else {
+      setViewMonth((m) => m - 1);
+    }
+  }
+
+  function nextMonth() {
+    if (viewMonth === 12) {
+      setViewYear((y) => y + 1);
+      setViewMonth(1);
+    } else {
+      setViewMonth((m) => m + 1);
+    }
+  }
+
+  function goTodayMonth() {
+    setViewYear(todayYear);
+    setViewMonth(todayMonth);
+  }
+
+  return (
+    <div className="sidebar-minical-card">
+      <div className="minical-header">
+        <div
+          className="minical-clock-wrap"
+          onClick={props.onOpenToday}
+          title={`今日已记录 ${props.todayCount} 项 (${props.todayHours.toFixed(1)}h)，点击查看`}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") props.onOpenToday();
+          }}
+        >
+          <span className="clock-live-dot" />
+          <span className="minical-clock-hm">{hoursMin}</span>
+          <span className="clock-colon">:</span>
+          <span className="minical-clock-sec">{sec}</span>
+          <span className="minical-today-pill-tag">今日{props.todayCount}项</span>
+        </div>
+
+        <div className="minical-title-wrap">
+          <button
+            type="button"
+            className="minical-nav-btn"
+            onClick={prevMonth}
+            title="上个月"
+            aria-label="上个月"
+          >
+            <ChevronLeft size={12} />
+          </button>
+          <span className="minical-title">
+            {viewYear}年{viewMonth}月
+          </span>
+          {isViewingOtherMonth && (
+            <button
+              type="button"
+              className="minical-today-pill"
+              onClick={goTodayMonth}
+              title="返回本月"
+            >
+              今
+            </button>
+          )}
+          <button
+            type="button"
+            className="minical-nav-btn"
+            onClick={nextMonth}
+            title="下个月"
+            aria-label="下个月"
+          >
+            <ChevronRight size={12} />
+          </button>
+        </div>
+      </div>
+
+      <div className="minical-weekdays">
+        <span>一</span>
+        <span>二</span>
+        <span>三</span>
+        <span>四</span>
+        <span>五</span>
+        <span>六</span>
+        <span>日</span>
+      </div>
+
+      <div className="minical-grid">
+        {calendarDays.map((d) => {
+          const hasRec = activeDates.has(d.dateStr);
+          return (
+            <button
+              key={d.dateStr}
+              type="button"
+              className={`minical-cell ${d.isCurrentMonth ? "in-month" : "out-month"} ${
+                d.isToday ? "is-today" : ""
+              } ${hasRec ? "has-records" : ""}`}
+              onClick={() => props.onSelectDate(d.dateStr)}
+              title={`${d.dateStr}${hasRec ? " · 有记录" : ""}，点击查看详情`}
+            >
+              <span className="cell-day-num">{d.dayNumber}</span>
+              {hasRec && <span className="cell-active-dot" />}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function SidebarWorkReportWidget(props: {
+  todayStr: string;
+  refreshTrigger: number;
+  onSelectDate: (date: string) => void;
+}) {
+  const [activeTab, setActiveTab] = React.useState<"trend" | "projects">("trend");
+  const [report, setReport] = React.useState<WorkReportSummary | null>(null);
+  const [hoveredIdx, setHoveredIdx] = React.useState<number | null>(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    api
+      .getWorkReportSummary(props.todayStr)
+      .then((data) => {
+        if (!cancelled) setReport(data);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [props.todayStr, props.refreshTrigger]);
+
+  const stats = report?.daily_stats ?? [];
+  const maxHours = Math.max(...stats.map((s) => s.total_hours), 4);
+
+  const maxDayStat = React.useMemo(() => {
+    return stats.reduce<DailyWorkStat | null>((best, curr) => {
+      if (!best || curr.total_hours > best.total_hours) {
+        return curr.total_hours > 0 ? curr : best;
+      }
+      return best;
+    }, null);
+  }, [stats]);
+
+  const goalPercent = Math.min(Math.round(((report?.week_total_hours ?? 0) / 40) * 100), 100);
+
+  const svgWidth = 216;
+  const svgHeight = 52;
+  const padLeft = 14;
+  const padRight = 14;
+  const padTop = 6;
+  const padBottom = 8;
+  const usableWidth = svgWidth - padLeft - padRight;
+  const usableHeight = svgHeight - padTop - padBottom;
+  const baselineY = svgHeight - padBottom;
+
+  const points = stats.map((s, i) => {
+    const x = padLeft + (stats.length > 1 ? i * (usableWidth / (stats.length - 1)) : usableWidth / 2);
+    const y = padTop + (1 - s.total_hours / maxHours) * usableHeight;
+    return { x, y, stat: s };
+  });
+
+  const { pathD, areaD } = React.useMemo(() => {
+    if (points.length === 0) return { pathD: "", areaD: "" };
+    if (points.length === 1) {
+      return {
+        pathD: `M ${points[0].x} ${points[0].y}`,
+        areaD: `M ${points[0].x} ${points[0].y} L ${points[0].x} ${baselineY} Z`
+      };
+    }
+    let pD = `M ${points[0].x.toFixed(1)} ${points[0].y.toFixed(1)}`;
+    for (let i = 0; i < points.length - 1; i++) {
+      const p0 = points[i === 0 ? 0 : i - 1];
+      const p1 = points[i];
+      const p2 = points[i + 1];
+      const p3 = points[i + 2 >= points.length ? i + 1 : i + 2];
+
+      const cp1x = p1.x + (p2.x - p0.x) / 6;
+      const cp1y = p1.y + (p2.y - p0.y) / 6;
+      const cp2x = p2.x - (p3.x - p1.x) / 6;
+      const cp2y = p2.y - (p3.y - p1.y) / 6;
+
+      pD += ` C ${cp1x.toFixed(1)} ${cp1y.toFixed(1)}, ${cp2x.toFixed(1)} ${cp2y.toFixed(1)}, ${p2.x.toFixed(1)} ${p2.y.toFixed(1)}`;
+    }
+    const lastX = points[points.length - 1].x.toFixed(1);
+    const firstX = points[0].x.toFixed(1);
+    const aD = `${pD} L ${lastX} ${baselineY} L ${firstX} ${baselineY} Z`;
+    return { pathD: pD, areaD: aD };
+  }, [points, baselineY]);
+
+  return (
+    <div className="sidebar-work-report-card">
+      <div className="report-card-header">
+        <div className="report-header-left">
+          <div className="report-icon-dot">
+            <Activity size={11} />
+          </div>
+          <span className="report-card-title">工作情况分析</span>
+          <span className="report-period-badge">本周</span>
+        </div>
+        <div className="report-tab-pills">
+          <button
+            type="button"
+            className={`report-tab-pill ${activeTab === "trend" ? "active" : ""}`}
+            onClick={() => setActiveTab("trend")}
+            title="工时趋势曲线"
+          >
+            <TrendingUp size={10} /> 趋势
+          </button>
+          <button
+            type="button"
+            className={`report-tab-pill ${activeTab === "projects" ? "active" : ""}`}
+            onClick={() => setActiveTab("projects")}
+            title="项目分布"
+          >
+            <PieChart size={10} /> 项目
+          </button>
+        </div>
+      </div>
+
+      {/* Metric Quick Stats */}
+      <div className="report-metrics-bar">
+        <div className="report-metric-col">
+          <span className="report-metric-num">{report?.week_total_hours.toFixed(1) ?? "0.0"}h</span>
+          <span className="report-metric-lbl">本周工时</span>
+        </div>
+        <div className="report-metric-sep" />
+        <div className="report-metric-col">
+          <span className="report-metric-num">{report?.week_avg_hours.toFixed(1) ?? "0.0"}h</span>
+          <span className="report-metric-lbl">日均工时</span>
+        </div>
+        <div className="report-metric-sep" />
+        <div className="report-metric-col">
+          <span className="report-metric-num">{report?.total_tasks ?? 0} 项</span>
+          <span className="report-metric-lbl">总任务数</span>
+        </div>
+      </div>
+
+      <div className="report-tab-body">
+        {activeTab === "trend" ? (
+          <div className="report-trend-content">
+            <div className="report-chart-container">
+              <div className="report-chart-svg-wrap">
+                <svg
+                  className="report-curve-svg"
+                  viewBox={`0 0 ${svgWidth} ${svgHeight}`}
+                  preserveAspectRatio="none"
+                >
+                  <defs>
+                    <linearGradient id="curveLineGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                      <stop offset="0%" stopColor="#2563eb" />
+                      <stop offset="50%" stopColor="#4f46e5" />
+                      <stop offset="100%" stopColor="#7c3aed" />
+                    </linearGradient>
+                    <linearGradient id="curveAreaGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+                      <stop offset="0%" stopColor="#4f46e5" stopOpacity="0.28" />
+                      <stop offset="65%" stopColor="#3b82f6" stopOpacity="0.06" />
+                      <stop offset="100%" stopColor="#3b82f6" stopOpacity="0.0" />
+                    </linearGradient>
+                  </defs>
+
+                  {/* Baseline dashed line */}
+                  <line
+                    x1={padLeft}
+                    y1={baselineY}
+                    x2={svgWidth - padRight}
+                    y2={baselineY}
+                    stroke="#e2e8f0"
+                    strokeWidth="1"
+                    strokeDasharray="2 2"
+                  />
+
+                  {/* Area Fill */}
+                  {areaD && <path d={areaD} fill="url(#curveAreaGradient)" />}
+
+                  {/* Line Stroke */}
+                  {pathD && (
+                    <path
+                      d={pathD}
+                      fill="none"
+                      stroke="url(#curveLineGradient)"
+                      strokeWidth="2.2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  )}
+
+                  {/* Data points */}
+                  {points.map((p, idx) => {
+                    const isHovered = hoveredIdx === idx;
+                    const isToday = p.stat.is_today;
+                    const hasHours = p.stat.total_hours > 0;
+
+                    return (
+                      <g
+                        key={p.stat.date}
+                        className="curve-point-group"
+                        onClick={() => props.onSelectDate(p.stat.date)}
+                        onMouseEnter={() => setHoveredIdx(idx)}
+                        onMouseLeave={() => setHoveredIdx(null)}
+                        style={{ cursor: "pointer" }}
+                      >
+                        <title>{`${p.stat.day_name} (${p.stat.date}): ${p.stat.total_hours}h · ${p.stat.task_count}项`}</title>
+                        <circle cx={p.x} cy={p.y} r="10" fill="transparent" />
+                        {isToday && (
+                          <circle
+                            cx={p.x}
+                            cy={p.y}
+                            r="5"
+                            fill="none"
+                            stroke="#3b82f6"
+                            strokeWidth="1.2"
+                            className="curve-point-pulse"
+                          />
+                        )}
+                        <circle
+                          cx={p.x}
+                          cy={p.y}
+                          r={isHovered ? 4 : isToday ? 3.2 : hasHours ? 2.8 : 2}
+                          fill={isHovered ? "#2563eb" : isToday ? "#3b82f6" : hasHours ? "#4f46e5" : "#cbd5e1"}
+                          stroke="#ffffff"
+                          strokeWidth={hasHours || isToday ? 1.2 : 0.8}
+                        />
+                      </g>
+                    );
+                  })}
+                </svg>
+              </div>
+
+              <div className="report-chart-weekdays">
+                {stats.map((s, idx) => (
+                  <span
+                    key={s.date}
+                    className={`chart-weekday-label ${s.is_today ? "is-today" : ""} ${
+                      hoveredIdx === idx ? "is-hovered" : ""
+                    }`}
+                    onClick={() => props.onSelectDate(s.date)}
+                    title={`${s.day_name} (${s.date}): ${s.total_hours}h · 点击查看`}
+                  >
+                    {s.day_name.replace("周", "")}
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            {/* Weekly Target Goal */}
+            <div className="report-goal-box">
+              <div className="report-goal-header">
+                <div className="report-goal-title">
+                  <Target size={11} className="goal-icon" />
+                  <span>周目标 (40h)</span>
+                </div>
+                <span className="report-goal-badge">{goalPercent}%</span>
+              </div>
+              <div className="report-goal-track">
+                <div
+                  className="report-goal-fill"
+                  style={{ width: `${goalPercent}%` }}
+                />
+              </div>
+              <div className="report-goal-footer">
+                <span>已达成 {report?.week_total_hours.toFixed(1) ?? "0.0"}h</span>
+                <span>
+                  {report && report.week_total_hours >= 40
+                    ? "已达标 🎉"
+                    : `还差 ${(Math.max(40 - (report?.week_total_hours ?? 0), 0)).toFixed(1)}h`}
+                </span>
+              </div>
+            </div>
+
+            {/* Highlights Grid */}
+            <div className="report-highlights-grid">
+              <div className="highlight-card">
+                <div className="highlight-card-top">
+                  <Award size={11} color="#d97706" />
+                  <span className="highlight-card-label">最佳产出日</span>
+                </div>
+                <span className="highlight-card-val" title={maxDayStat ? `${maxDayStat.day_name} (${maxDayStat.total_hours}h)` : "暂无"}>
+                  {maxDayStat ? `${maxDayStat.day_name} · ${maxDayStat.total_hours}h` : "暂无"}
+                </span>
+              </div>
+
+              <div className="highlight-card">
+                <div className="highlight-card-top">
+                  <Flame size={11} color="#ea580c" />
+                  <span className="highlight-card-label">本周活跃</span>
+                </div>
+                <span className="highlight-card-val">
+                  {report?.active_days ?? 0} / 7 天
+                </span>
+              </div>
+            </div>
+
+            {/* Subtle Motivational Status */}
+            <div className="report-status-tip">
+              <Sparkles size={11} className="tip-sparkle" />
+              <span>
+                {report && report.week_total_hours >= 35
+                  ? "本周工作饱满，产出高效！"
+                  : report && report.week_total_hours >= 20
+                  ? "保持良好节奏，稳步推进目标。"
+                  : "记录每日工作，清晰沉淀成果。"}
+              </span>
+            </div>
+          </div>
+        ) : (
+          <div className="report-projects-content">
+            <div className="report-projects-container">
+              {(!report?.top_projects || report.top_projects.length === 0) ? (
+                <div className="report-projects-empty">本周暂无项目数据</div>
+              ) : (
+                <div className="report-projects-list">
+                  {report.top_projects.map((p, idx) => {
+                    const colorGradients = [
+                      "linear-gradient(90deg, #2563eb, #4f46e5)",
+                      "linear-gradient(90deg, #059669, #0d9488)",
+                      "linear-gradient(90deg, #d97706, #ea580c)",
+                      "linear-gradient(90deg, #8b5cf6, #6366f1)",
+                      "linear-gradient(90deg, #ec4899, #f43f5e)"
+                    ];
+                    const grad = colorGradients[idx % colorGradients.length];
+
+                    return (
+                      <div key={p.project} className="project-stat-row">
+                        <div className="project-stat-top">
+                          <span className="project-name" title={p.project}>
+                            {p.project}
+                          </span>
+                          <span className="project-hours">
+                            {p.hours}h · {p.percentage.toFixed(0)}%
+                          </span>
+                        </div>
+                        <div className="project-progress-track">
+                          <div
+                            className="project-progress-fill"
+                            style={{
+                              width: `${Math.min(p.percentage, 100)}%`,
+                              background: grad
+                            }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {report?.top_projects && report.top_projects.length > 0 && (
+              <div className="report-projects-summary">
+                <span>共投入 {report.top_projects.length} 个项目</span>
+                <span title={report.top_projects[0].project}>
+                  主要: {report.top_projects[0].project}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DayDetailModal(props: {
+  date: string | null;
+  onClose: () => void;
+  onEditLog: (log: WorkLog) => void;
+  onCreateForDate: (date: string) => void;
+}) {
+  const [logs, setLogs] = React.useState<WorkLog[]>([]);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState("");
+
+  const targetDate = props.date;
+
+  React.useEffect(() => {
+    if (!targetDate) return;
+    setLoading(true);
+    setError("");
+    api
+      .listWorkLogsByDate(targetDate)
+      .then((items) => setLogs(items))
+      .catch((err) => setError(err instanceof Error ? err.message : "加载该日工作记录失败"))
+      .finally(() => setLoading(false));
+  }, [targetDate]);
+
+  React.useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        props.onClose();
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [props.onClose]);
+
+  if (!targetDate) return null;
+
+  const totalHours = logs.reduce((acc, curr) => acc + (curr.hours ?? 0), 0);
+
+  const dateObj = new Date(targetDate + "T00:00:00");
+  const weekdays = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
+  const weekdayLabel = isNaN(dateObj.getDay()) ? "" : weekdays[dateObj.getDay()];
+  const isWeekend = dateObj.getDay() === 0 || dateObj.getDay() === 6;
+
+  return (
+    <div
+      className="email-dialog-backdrop day-detail-backdrop"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) props.onClose();
+      }}
+    >
+      <div
+        className="email-dialog day-detail-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="day-detail-title"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="dialog-heading day-detail-header">
+          <div className="day-detail-title-wrap">
+            <div className="day-detail-icon-circle">
+              <CalendarDays size={20} />
+            </div>
+            <div>
+              <div className="day-detail-date-row">
+                <h2 id="day-detail-title">{targetDate}</h2>
+                <span className={`day-weekday-tag ${isWeekend ? "weekend" : "workday"}`}>
+                  {weekdayLabel}
+                </span>
+              </div>
+              <p className="day-detail-subtitle">
+                当天共 <strong>{logs.length}</strong> 条记录 · 合计工时{" "}
+                <strong>{totalHours.toFixed(1)}</strong> 小时
+              </p>
+            </div>
+          </div>
+          <div className="day-detail-header-actions">
+            <button
+              type="button"
+              className="primary compact new-log-btn"
+              onClick={() => props.onCreateForDate(targetDate)}
+            >
+              <Plus size={14} /> 新增该日记录
+            </button>
+            <button
+              className="icon-button"
+              type="button"
+              aria-label="关闭详情窗口"
+              onClick={props.onClose}
+            >
+              <X size={18} />
+            </button>
+          </div>
+        </div>
+
+        <div className="day-detail-body">
+          {loading ? (
+            <div className="day-detail-loading">
+              <LoaderCircle className="spin" size={28} />
+              <span>正在获取该日工作记录...</span>
+            </div>
+          ) : error ? (
+            <div className="error" role="alert">
+              <CircleAlert size={16} />
+              <span>{error}</span>
+            </div>
+          ) : logs.length === 0 ? (
+            <div className="day-detail-empty">
+              <div className="empty-icon-circle">
+                <CalendarDays size={32} />
+              </div>
+              <h3>当天暂无工作记录</h3>
+              <p>记录当天的具体工作、推进进展与成果产出，轻松沉淀工作足迹</p>
+              <button
+                type="button"
+                className="primary"
+                onClick={() => props.onCreateForDate(targetDate)}
+              >
+                <Plus size={15} /> 立即创建该日记录
+              </button>
+            </div>
+          ) : (
+            <div className="day-detail-list">
+              {logs.map((item) => {
+                const priorityLabels: Record<string, string> = {
+                  high: "高优",
+                  medium: "中优",
+                  low: "低优"
+                };
+                return (
+                  <div key={item.id} className="day-log-card">
+                    <div className="day-log-card-header">
+                      <div className="day-log-meta-left">
+                        <span className={`day-priority-pill ${item.priority}`}>
+                          {priorityLabels[item.priority] || item.priority}
+                        </span>
+                        <span className="day-project-badge">{item.project}</span>
+                        {item.origin === "auto" && (
+                          <span className="day-origin-badge" title="系统根据开发活动自动捕获">
+                            自动捕获
+                          </span>
+                        )}
+                      </div>
+                      <div className="day-log-meta-right">
+                        {item.hours != null && (
+                          <span className="day-hours-badge">
+                            <Clock size={12} /> {item.hours}h
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          className="secondary compact day-edit-btn"
+                          onClick={() => props.onEditLog(item)}
+                        >
+                          <Pencil size={13} /> 前往编辑
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="day-log-task-title">{item.task}</div>
+
+                    {item.progress && (
+                      <div className="day-log-field-row">
+                        <span className="field-lbl">进展：</span>
+                        <span className="field-val">{item.progress}</span>
+                      </div>
+                    )}
+
+                    {item.result && (
+                      <div className="day-log-field-row">
+                        <span className="field-lbl">成果：</span>
+                        <span className="field-val">{item.result}</span>
+                      </div>
+                    )}
+
+                    {item.blockers && (
+                      <div className="day-log-field-row warning">
+                        <span className="field-lbl">阻塞：</span>
+                        <span className="field-val">{item.blockers}</span>
+                      </div>
+                    )}
+
+                    {item.notes && (
+                      <div className="day-log-field-row notes">
+                        <span className="field-lbl">备注：</span>
+                        <span className="field-val">{item.notes}</span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="day-detail-footer">
+          <span className="day-footer-hint">
+            提示：点击「前往编辑」可直接跳转到每日记录面板并载入该条数据进行修改
+          </span>
+          <button type="button" className="secondary" onClick={props.onClose}>
+            关闭
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function App() {
@@ -109,6 +921,9 @@ function App() {
   const [activityCandidates, setActivityCandidates] = React.useState<ActivitySourceCandidate[]>([]);
   const [dailyCaptureSettings, setDailyCaptureSettings] = React.useState<DailyCaptureSettings | null>(null);
   const [dailyCaptureRuns, setDailyCaptureRuns] = React.useState<DailyCaptureRun[]>([]);
+  const [inspectedDate, setInspectedDate] = React.useState<string | null>(null);
+  const [targetEditLog, setTargetEditLog] = React.useState<WorkLog | null>(null);
+  const [targetCreateDate, setTargetCreateDate] = React.useState<string | null>(null);
   const [notice, setNotice] = React.useState("");
   const [error, setError] = React.useState("");
   const [loading, setLoading] = React.useState(true);
@@ -198,30 +1013,93 @@ function App() {
     }
   }
 
+  const todayStr = today();
+  const todayItems = React.useMemo(() => {
+    return workLogs.filter((item) => item.start_date === todayStr || item.work_date === todayStr);
+  }, [workLogs, todayStr]);
+  const todayHours = React.useMemo(() => {
+    return todayItems.reduce((acc, curr) => acc + (curr.hours ?? 0), 0);
+  }, [todayItems]);
+
   return (
     <main className={loading ? "app-shell is-loading" : "app-shell"}>
       <aside className="sidebar">
         <div className="brand">
-          <NotebookTabs size={26} />
-          <div>
-            <strong>Worklog</strong>
-            <span>工作记录与报告</span>
+          <div className="brand-icon-wrapper">
+            <NotebookTabs size={20} />
+          </div>
+          <div className="brand-text">
+            <div className="brand-title-row">
+              <strong>Worklog</strong>
+              <span className="brand-version-badge">v2.0.7</span>
+            </div>
+            <span>智能工作记录与报告</span>
           </div>
         </div>
-        <nav>
-          <TabButton active={tab === "logs"} icon={<CalendarDays size={18} />} onClick={() => setTab("logs")}>
+
+        <nav className="sidebar-nav">
+          <TabButton
+            active={tab === "logs"}
+            icon={<CalendarDays size={17} />}
+            onClick={() => setTab("logs")}
+            badge={workLogMeta.total > 0 ? `${workLogMeta.total}` : undefined}
+          >
             每日记录
           </TabButton>
-          <TabButton active={tab === "reports"} icon={<FileText size={18} />} onClick={() => setTab("reports")}>
+          <TabButton
+            active={tab === "reports"}
+            icon={<FileText size={17} />}
+            onClick={() => setTab("reports")}
+            badge={reports.length > 0 ? `${reports.length}` : undefined}
+          >
             报告草稿
           </TabButton>
-          <TabButton active={tab === "templates"} icon={<NotebookTabs size={18} />} onClick={() => setTab("templates")}>
+          <TabButton
+            active={tab === "templates"}
+            icon={<NotebookTabs size={17} />}
+            onClick={() => setTab("templates")}
+            badge={templates.length > 0 ? `${templates.length}` : undefined}
+          >
             模板管理
           </TabButton>
-          <TabButton active={tab === "settings"} icon={<Settings size={18} />} onClick={() => setTab("settings")}>
+          <TabButton
+            active={tab === "settings"}
+            icon={<Settings size={17} />}
+            onClick={() => setTab("settings")}
+          >
             系统设置
           </TabButton>
         </nav>
+
+        <SidebarClockAndCalendar
+          todayStr={todayStr}
+          todayCount={todayItems.length}
+          todayHours={todayHours}
+          onOpenToday={() => setInspectedDate(todayStr)}
+          onSelectDate={(d) => setInspectedDate(d)}
+          refreshTrigger={workLogMeta.total}
+        />
+
+        <SidebarWorkReportWidget
+          todayStr={todayStr}
+          refreshTrigger={workLogMeta.total}
+          onSelectDate={(d) => setInspectedDate(d)}
+        />
+
+        <div className="sidebar-footer">
+          <button
+            type="button"
+            className="sidebar-model-pill"
+            title="点击前往配置 AI 模型"
+            onClick={() => setTab("settings")}
+          >
+            <span className={`status-indicator-dot ${llmSetting ? "online" : "offline"}`} />
+            <span className="model-pill-text">
+              {llmSetting ? `${providerLabels[llmSetting.provider] || llmSetting.provider}` : "点击配置 AI 模型"}
+            </span>
+            <Settings size={13} className="model-pill-icon" />
+          </button>
+        </div>
       </aside>
 
       <section className="workspace" aria-busy={loading}>
@@ -241,6 +1119,8 @@ function App() {
         {notice && <div className="notice" role="status"><CheckCircle2 size={17} />{notice}</div>}
         {error && <div className="error" role="alert"><CircleAlert size={17} />{error}</div>}
 
+        <div className="page-content-wrapper">
+
         {tab === "logs" && (
           <WorkLogsPage
             items={workLogs}
@@ -254,6 +1134,11 @@ function App() {
               setWorkLogPageSize(nextPageSize);
               setWorkLogPage(1);
             }}
+            onOpenSettings={() => setTab("settings")}
+            targetEditLog={targetEditLog}
+            onClearTargetEditLog={() => setTargetEditLog(null)}
+            targetCreateDate={targetCreateDate}
+            onClearTargetCreateDate={() => setTargetCreateDate(null)}
           />
         )}
         {tab === "reports" && (
@@ -394,7 +1279,25 @@ function App() {
             }}
           />
         )}
+        </div>
       </section>
+
+      {inspectedDate && (
+        <DayDetailModal
+          date={inspectedDate}
+          onClose={() => setInspectedDate(null)}
+          onEditLog={(log) => {
+            setTab("logs");
+            setTargetEditLog(log);
+            setInspectedDate(null);
+          }}
+          onCreateForDate={(date) => {
+            setTab("logs");
+            setTargetCreateDate(date);
+            setInspectedDate(null);
+          }}
+        />
+      )}
     </main>
   );
 }
@@ -408,12 +1311,751 @@ function tabTitle(tab: Tab) {
   }[tab];
 }
 
-function TabButton(props: { active: boolean; icon: React.ReactNode; onClick: () => void; children: React.ReactNode }) {
+function TabButton(props: {
+  active: boolean;
+  icon: React.ReactNode;
+  onClick: () => void;
+  children: React.ReactNode;
+  badge?: string | number;
+}) {
   return (
-    <button type="button" className={props.active ? "tab active" : "tab"} aria-current={props.active ? "page" : undefined} onClick={props.onClick}>
+    <button
+      type="button"
+      className={props.active ? "tab active" : "tab"}
+      aria-current={props.active ? "page" : undefined}
+      onClick={props.onClick}
+    >
       {props.icon}
-      <span>{props.children}</span>
+      <span className="tab-label">{props.children}</span>
+      {props.badge !== undefined && (
+        <span className="tab-badge">{props.badge}</span>
+      )}
     </button>
+  );
+}
+
+interface WorkLogAiDialogueDialogProps {
+  isOpen: boolean;
+  onClose: () => void;
+  items: WorkLog[];
+  currentEditingId: number | null;
+  onApplyModification: (logId: number, payload: Partial<WorkLog>) => Promise<void>;
+  onLoadIntoForm: (payload: Partial<WorkLog>, logId: number) => void;
+  onOpenSettings?: () => void;
+}
+
+interface DialogueMessageItem {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  actions?: WorkLogModificationAction[];
+  appliedMap?: Record<number, boolean>;
+  undoneMap?: Record<number, boolean>;
+}
+
+function buildWelcomeMessage(selectedIds: number[]): DialogueMessageItem {
+  if (selectedIds.length > 0) {
+    return {
+      id: "welcome",
+      role: "assistant",
+      content: `已就绪，当前已选 ${selectedIds.length} 条目标记录。请直接告诉我如何调整。`
+    };
+  }
+  return {
+    id: "welcome",
+    role: "assistant",
+    content: "你好！请描述需要修改的工作记录及具体调整要求。"
+  };
+}
+
+function WorkLogAiDialogueDialog(props: WorkLogAiDialogueDialogProps) {
+  const initialLogIds = React.useMemo(() => {
+    if (props.currentEditingId && props.items.some((i) => i.id === props.currentEditingId)) {
+      return [props.currentEditingId];
+    }
+    return [];
+  }, [props.currentEditingId, props.items]);
+
+  const [selectedLogIds, setSelectedLogIds] = React.useState<number[]>(initialLogIds);
+  const [selectorOpen, setSelectorOpen] = React.useState(false);
+  const [autoApply, setAutoApply] = React.useState(false);
+  const [messages, setMessages] = React.useState<DialogueMessageItem[]>(() => [
+    buildWelcomeMessage(initialLogIds)
+  ]);
+  const [input, setInput] = React.useState("");
+  const [loading, setLoading] = React.useState(false);
+  const [actionLoading, setActionLoading] = React.useState(false);
+  const [llmNotConfigured, setLlmNotConfigured] = React.useState(false);
+  const messagesEndRef = React.useRef<HTMLDivElement | null>(null);
+  const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
+  const dropdownRef = React.useRef<HTMLDivElement | null>(null);
+  const abortRequestIdRef = React.useRef(0);
+
+  React.useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, loading]);
+
+  React.useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setSelectorOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  function handleToggleSelectAll() {
+    const allIds = props.items.map((i) => i.id);
+    if (selectedLogIds.length === allIds.length) {
+      setSelectedLogIds([]);
+    } else {
+      setSelectedLogIds(allIds);
+    }
+  }
+
+  function handleClearHistory() {
+    setMessages([buildWelcomeMessage(selectedLogIds)]);
+    setLlmNotConfigured(false);
+  }
+
+  function handleStop() {
+    abortRequestIdRef.current = 0;
+    setLoading(false);
+    setMessages((curr) => [
+      ...curr,
+      {
+        id: "stopped-" + Date.now(),
+        role: "assistant",
+        content: "（已停止生成。可继续输入消息继续对话）"
+      }
+    ]);
+    setTimeout(() => {
+      textareaRef.current?.focus();
+    }, 50);
+  }
+
+  async function handleSend(customText?: string) {
+    const text = (customText ?? input).trim();
+    if (!text || loading) return;
+
+    setInput("");
+    const userMsgId = "user-" + Date.now();
+    const newMsg: DialogueMessageItem = {
+      id: userMsgId,
+      role: "user",
+      content: text
+    };
+
+    const nextHistory = [...messages, newMsg];
+    setMessages(nextHistory);
+    setLoading(true);
+
+    const reqId = ++abortRequestIdRef.current;
+
+    try {
+      const apiMessages: ChatMessage[] = nextHistory
+        .filter((m) => m.id !== "welcome" && !m.id.startsWith("switch-") && !m.id.startsWith("error-") && !m.id.startsWith("stopped-"))
+        .map((m) => {
+          let content = m.content;
+          if (m.role === "assistant" && m.actions && m.actions.length > 0) {
+            const actionSummaries = m.actions
+              .map((act) => {
+                const diffStr = (act.changes_summary ?? [])
+                  .map((d) => `${d.label || d.field}: ${d.old_value ?? "空"} -> ${d.new_value ?? "空"}`)
+                  .join(", ");
+                return `【已针对记录 #${act.log_id} 调整: ${diffStr}】`;
+              })
+              .join("; ");
+            content = `${content}\n${actionSummaries}`;
+          }
+          return {
+            role: m.role,
+            content
+          };
+        });
+
+      const res = await api.chatModifyWorkLog({
+        messages: apiMessages,
+        current_editing_id: props.currentEditingId,
+        target_log_ids: selectedLogIds.length > 0 ? selectedLogIds : null
+      });
+
+      if (abortRequestIdRef.current !== reqId) {
+        return;
+      }
+
+      const responseActions = res.actions && res.actions.length > 0
+        ? res.actions
+        : (res.action ? [res.action] : []);
+
+      const initialAppliedMap: Record<number, boolean> = {};
+      if (responseActions.length > 0 && autoApply) {
+        try {
+          await Promise.all(
+            responseActions.map((act) => props.onApplyModification(act.log_id, act.updated))
+          );
+          for (const act of responseActions) {
+            initialAppliedMap[act.log_id] = true;
+          }
+        } catch (applyErr) {
+          console.error("Auto-apply failed:", applyErr);
+        }
+      }
+
+      if (abortRequestIdRef.current !== reqId) {
+        return;
+      }
+
+      setMessages((curr) => [
+        ...curr,
+        {
+          id: "assistant-" + Date.now(),
+          role: "assistant",
+          content: responseActions.length > 0 && autoApply
+            ? `${res.reply}\n\n（已自动保存修改到本地数据库）`
+            : res.reply,
+          actions: responseActions,
+          appliedMap: initialAppliedMap
+        }
+      ]);
+    } catch (err) {
+      if (abortRequestIdRef.current !== reqId) {
+        return;
+      }
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (errMsg.includes("llm_not_configured") || errMsg.includes("not configured") || errMsg.includes("未配置")) {
+        setLlmNotConfigured(true);
+        setMessages((curr) => [
+          ...curr,
+          {
+            id: "error-" + Date.now(),
+            role: "assistant",
+            content: "当前尚未配置 LLM 模型，请先前往系统设置添加 API Key 后再使用自然语言修改功能。"
+          }
+        ]);
+      } else {
+        setMessages((curr) => [
+          ...curr,
+          {
+            id: "error-" + Date.now(),
+            role: "assistant",
+            content: `处理失败：${errMsg}`
+          }
+        ]);
+      }
+    } finally {
+      if (abortRequestIdRef.current === reqId) {
+        setLoading(false);
+      }
+    }
+  }
+
+  async function handleApplySingle(msgId: string, action: WorkLogModificationAction) {
+    setActionLoading(true);
+    try {
+      await props.onApplyModification(action.log_id, action.updated);
+      setMessages((curr) =>
+        curr.map((m) => {
+          if (m.id !== msgId) return m;
+          return {
+            ...m,
+            appliedMap: { ...(m.appliedMap ?? {}), [action.log_id]: true },
+            undoneMap: { ...(m.undoneMap ?? {}), [action.log_id]: false }
+          };
+        })
+      );
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "应用修改失败");
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
+  async function handleUndoSingle(msgId: string, action: WorkLogModificationAction) {
+    setActionLoading(true);
+    try {
+      await props.onApplyModification(action.log_id, action.original);
+      setMessages((curr) =>
+        curr.map((m) => {
+          if (m.id !== msgId) return m;
+          return {
+            ...m,
+            appliedMap: { ...(m.appliedMap ?? {}), [action.log_id]: false },
+            undoneMap: { ...(m.undoneMap ?? {}), [action.log_id]: true }
+          };
+        })
+      );
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "撤销修改失败");
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
+  async function handleApplyAll(msgId: string, actions: WorkLogModificationAction[]) {
+    setActionLoading(true);
+    try {
+      await Promise.all(
+        actions.map((act) => props.onApplyModification(act.log_id, act.updated))
+      );
+      setMessages((curr) =>
+        curr.map((m) => {
+          if (m.id !== msgId) return m;
+          const nextApplied = { ...(m.appliedMap ?? {}) };
+          const nextUndone = { ...(m.undoneMap ?? {}) };
+          for (const act of actions) {
+            nextApplied[act.log_id] = true;
+            nextUndone[act.log_id] = false;
+          }
+          return { ...m, appliedMap: nextApplied, undoneMap: nextUndone };
+        })
+      );
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "批量应用修改失败");
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
+  async function handleUndoAll(msgId: string, actions: WorkLogModificationAction[]) {
+    setActionLoading(true);
+    try {
+      await Promise.all(
+        actions.map((act) => props.onApplyModification(act.log_id, act.original))
+      );
+      setMessages((curr) =>
+        curr.map((m) => {
+          if (m.id !== msgId) return m;
+          const nextApplied = { ...(m.appliedMap ?? {}) };
+          const nextUndone = { ...(m.undoneMap ?? {}) };
+          for (const act of actions) {
+            nextApplied[act.log_id] = false;
+            nextUndone[act.log_id] = true;
+          }
+          return { ...m, appliedMap: nextApplied, undoneMap: nextUndone };
+        })
+      );
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "批量撤销修改失败");
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
+  function handleLoadIntoForm(action: WorkLogModificationAction) {
+    props.onLoadIntoForm(action.updated, action.log_id);
+    props.onClose();
+  }
+
+  return (
+    <div
+      className="email-dialog-backdrop"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) props.onClose();
+      }}
+    >
+      <div
+        className="email-dialog worklog-ai-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="worklog-ai-dialog-title"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="dialog-heading">
+          <div>
+            <p className="section-eyebrow">AI 记录助手</p>
+            <h2 id="worklog-ai-dialog-title">AI 对话修改记录</h2>
+            <p>智能对话调整工作记录，支持多轮对话与多选批量修改</p>
+          </div>
+          <button
+            className="icon-button"
+            type="button"
+            aria-label="关闭对话窗口"
+            onClick={props.onClose}
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="worklog-ai-toolbar">
+          <div className="toolbar-left" ref={dropdownRef}>
+            <div className="target-multiselect-container">
+              <button
+                type="button"
+                className={`target-multiselect-trigger ${selectorOpen ? "is-open" : ""}`}
+                onClick={() => setSelectorOpen((v) => !v)}
+              >
+                <span className="multiselect-label">目标记录：</span>
+                {selectedLogIds.length === 0 ? (
+                  <span className="multiselect-val placeholder">智能识别（由 AI 自动匹配）</span>
+                ) : (
+                  <span className="multiselect-val active">已选 {selectedLogIds.length} 条记录</span>
+                )}
+                <ChevronDown size={14} className={`dropdown-arrow ${selectorOpen ? "rotated" : ""}`} />
+              </button>
+
+              {selectorOpen && (
+                <div className="target-multiselect-dropdown">
+                  <div className="multiselect-dropdown-header">
+                    <span>选择目标记录</span>
+                    <div className="multiselect-header-actions">
+                      <button
+                        type="button"
+                        className="text-btn"
+                        onClick={handleToggleSelectAll}
+                      >
+                        {selectedLogIds.length === props.items.length ? "取消全选" : "全选当前页"}
+                      </button>
+                      {selectedLogIds.length > 0 && (
+                        <button
+                          type="button"
+                          className="text-btn danger"
+                          onClick={() => setSelectedLogIds([])}
+                        >
+                          清空
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="multiselect-options-list">
+                    {props.items.length === 0 ? (
+                      <div className="multiselect-empty">暂无可选记录</div>
+                    ) : (
+                      props.items.map((item) => {
+                        const isChecked = selectedLogIds.includes(item.id);
+                        return (
+                          <label
+                            key={item.id}
+                            className={`multiselect-option ${isChecked ? "checked" : ""}`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setSelectedLogIds((curr) => [...curr, item.id]);
+                                } else {
+                                  setSelectedLogIds((curr) => curr.filter((id) => id !== item.id));
+                                }
+                              }}
+                            />
+                            <div className="option-info">
+                              <div className="option-title-row">
+                                <span className="option-date">{item.start_date}</span>
+                                <span className="option-project">{item.project}</span>
+                                {item.hours != null && <span className="option-hours">{item.hours}h</span>}
+                              </div>
+                              <div className="option-task">{item.task}</div>
+                            </div>
+                          </label>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="toolbar-right">
+            <label className="auto-apply-label" title="开启后，AI 返回的修改将自动保存到数据库">
+              <input
+                type="checkbox"
+                checked={autoApply}
+                onChange={(e) => setAutoApply(e.target.checked)}
+              />
+              <span>自动应用修改</span>
+            </label>
+            <button
+              type="button"
+              className="icon-button compact-btn"
+              title="清空对话历史"
+              onClick={handleClearHistory}
+            >
+              <RefreshCw size={14} />
+            </button>
+          </div>
+        </div>
+
+        {selectedLogIds.length > 0 && (
+          <div className="selected-targets-pill-row">
+            <span className="pills-label">已选 {selectedLogIds.length} 条：</span>
+            <div className="pills-list">
+              {selectedLogIds.map((id) => {
+                const item = props.items.find((i) => i.id === id);
+                if (!item) return null;
+                return (
+                  <span key={id} className="target-item-pill">
+                    <span className="pill-text">[{item.start_date}] {item.project} · {item.task}</span>
+                    <button
+                      type="button"
+                      className="pill-remove-btn"
+                      title="移除此记录"
+                      onClick={() => setSelectedLogIds((curr) => curr.filter((i) => i !== id))}
+                    >
+                      <X size={12} />
+                    </button>
+                  </span>
+                );
+              })}
+            </div>
+            <button
+              type="button"
+              className="clear-all-targets-btn"
+              onClick={() => setSelectedLogIds([])}
+            >
+              清空
+            </button>
+          </div>
+        )}
+
+        {llmNotConfigured && (
+          <div className="llm-warning-card">
+            <CircleAlert size={18} />
+            <div>
+              <strong>未配置 LLM 模型</strong>
+              <p>自然语言对话修改记录需要配置并启用大模型。请前往系统设置添加 API Key。</p>
+              {props.onOpenSettings && (
+                <button
+                  type="button"
+                  className="secondary compact"
+                  onClick={() => {
+                    props.onClose();
+                    props.onOpenSettings?.();
+                  }}
+                >
+                  前往配置 LLM
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="worklog-chat-messages">
+          {messages.map((m) => {
+            const hasActions = Boolean(m.actions && m.actions.length > 0);
+            const actionsList = m.actions ?? [];
+            const allApplied = hasActions && actionsList.every((act) => Boolean(m.appliedMap?.[act.log_id]));
+            const someApplied = hasActions && actionsList.some((act) => Boolean(m.appliedMap?.[act.log_id]));
+
+            return (
+              <div key={m.id} className={`worklog-chat-row ${m.role}`}>
+                <div className={`chat-avatar ${m.role}`}>
+                  {m.role === "user" ? "我" : <Sparkles size={14} />}
+                </div>
+                <div className="chat-bubble-container">
+                  <div className={`chat-bubble ${m.role}`}>{m.content}</div>
+
+                  {hasActions && (
+                    <div className="worklog-multi-actions-container">
+                      {actionsList.length > 1 && (
+                        <div className="worklog-batch-actions-header">
+                          <span className="batch-header-title">
+                            共修改 <strong>{actionsList.length}</strong> 条记录
+                          </span>
+                          <div className="batch-header-buttons">
+                            {allApplied ? (
+                              <>
+                                <span className="applied-pill">
+                                  <Check size={14} /> 全部已保存
+                                </span>
+                                <button
+                                  type="button"
+                                  className="secondary compact diff-undo-btn"
+                                  disabled={actionLoading}
+                                  onClick={() => handleUndoAll(m.id, actionsList)}
+                                >
+                                  <RotateCcw size={13} /> 一键撤销全部
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                <button
+                                  type="button"
+                                  className="primary compact"
+                                  disabled={actionLoading}
+                                  onClick={() => handleApplyAll(m.id, actionsList)}
+                                >
+                                  <Check size={14} /> 一键应用全部修改 ({actionsList.length} 条)
+                                </button>
+                                {someApplied && (
+                                  <button
+                                    type="button"
+                                    className="secondary compact diff-undo-btn"
+                                    disabled={actionLoading}
+                                    onClick={() => handleUndoAll(m.id, actionsList)}
+                                  >
+                                    <RotateCcw size={13} /> 撤销已修改项
+                                  </button>
+                                )}
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="worklog-diff-cards-grid">
+                        {actionsList.map((action) => {
+                          const isApplied = Boolean(m.appliedMap?.[action.log_id]);
+
+                          return (
+                            <div key={action.log_id} className="worklog-diff-card">
+                              <div className="worklog-diff-card-header">
+                                <div className="diff-target-badge">
+                                  <span>{action.updated.start_date}</span>
+                                  <span>·</span>
+                                  <span>{action.updated.project}</span>
+                                </div>
+                                <div className="diff-task-title">{action.updated.task}</div>
+                              </div>
+
+                              <div className="worklog-diff-changes">
+                                {action.changes_summary.length > 0 ? (
+                                  action.changes_summary.map((change, idx) => (
+                                    <div key={idx} className="diff-change-item">
+                                      <span className="diff-field-badge">{change.label}</span>
+                                      <div className="diff-change-values">
+                                        <span className="diff-old-val">{change.old_value || "（空）"}</span>
+                                        <ArrowRight size={13} className="diff-arrow" />
+                                        <span className="diff-new-val">{change.new_value || "（空）"}</span>
+                                      </div>
+                                    </div>
+                                  ))
+                                ) : (
+                                  <div className="diff-change-item">
+                                    <span className="diff-field-badge">状态</span>
+                                    <span className="diff-new-val">字段内容保持一致，无变更</span>
+                                  </div>
+                                )}
+                              </div>
+
+                              <div className="worklog-diff-actions">
+                                {isApplied ? (
+                                  <div className="worklog-diff-applied-row">
+                                    <span className="applied-pill">
+                                      <Check size={14} /> 已保存到数据库
+                                    </span>
+                                    <button
+                                      type="button"
+                                      className="secondary compact diff-undo-btn"
+                                      disabled={actionLoading}
+                                      onClick={() => handleUndoSingle(m.id, action)}
+                                    >
+                                      <RotateCcw size={13} /> 撤销修改
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <div className="worklog-diff-pending-row">
+                                    <button
+                                      type="button"
+                                      className="primary compact"
+                                      disabled={actionLoading}
+                                      onClick={() => handleApplySingle(m.id, action)}
+                                    >
+                                      <Check size={14} /> 确认应用修改
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="secondary compact"
+                                      disabled={actionLoading}
+                                      onClick={() => handleLoadIntoForm(action)}
+                                    >
+                                      <Pencil size={13} /> 载入左侧表单
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+
+          {loading && (
+            <div className="worklog-chat-row assistant">
+              <div className="chat-avatar assistant">
+                <Sparkles size={14} />
+              </div>
+              <div className="chat-bubble-container">
+                <div className="chat-bubble assistant loading">
+                  <LoaderCircle className="spin" size={14} />
+                  <span>AI 正在思考并调整记录...</span>
+                  <button
+                    type="button"
+                    className="chat-bubble-stop-link"
+                    onClick={handleStop}
+                    title="停止生成"
+                  >
+                    停止
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+          <div ref={messagesEndRef} />
+        </div>
+
+        <form
+          className="worklog-chat-input-box"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (loading) {
+              handleStop();
+            } else {
+              void handleSend();
+            }
+          }}
+        >
+          <textarea
+            ref={textareaRef}
+            autoFocus
+            rows={2}
+            value={input}
+            placeholder={
+              loading
+                ? "正在生成中，可点击停止或继续输入追加内容..."
+                : "输入修改需求，按 Enter 发送，Shift+Enter 换行..."
+            }
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                if (!loading) {
+                  void handleSend();
+                }
+              }
+            }}
+          />
+          {loading ? (
+            <button
+              type="button"
+              className="danger worklog-chat-stop-btn"
+              onClick={handleStop}
+              title="停止当前生成"
+            >
+              <Square size={14} fill="currentColor" />
+              <span>停止</span>
+            </button>
+          ) : (
+            <button
+              type="submit"
+              className="primary worklog-chat-send-btn"
+              disabled={!input.trim()}
+              title="发送 (Enter)"
+            >
+              <Send size={18} />
+            </button>
+          )}
+        </form>
+      </div>
+    </div>
   );
 }
 
@@ -426,6 +2068,11 @@ function WorkLogsPage(props: {
   onDelete: (id: number) => Promise<void>;
   onPageChange: (page: number) => void;
   onPageSizeChange: (pageSize: number) => void;
+  onOpenSettings?: () => void;
+  targetEditLog?: WorkLog | null;
+  onClearTargetEditLog?: () => void;
+  targetCreateDate?: string | null;
+  onClearTargetCreateDate?: () => void;
 }) {
   const emptyForm = React.useCallback(
     () => ({
@@ -455,6 +2102,26 @@ function WorkLogsPage(props: {
     notes: ""
   });
   const [editingId, setEditingId] = React.useState<number | null>(null);
+  const [aiDialogOpen, setAiDialogOpen] = React.useState(false);
+
+  React.useEffect(() => {
+    if (props.targetEditLog) {
+      startEdit(props.targetEditLog);
+      props.onClearTargetEditLog?.();
+    }
+  }, [props.targetEditLog, props.onClearTargetEditLog]);
+
+  React.useEffect(() => {
+    if (props.targetCreateDate) {
+      setEditingId(null);
+      setForm({
+        ...emptyForm(),
+        start_date: props.targetCreateDate,
+        end_date: props.targetCreateDate
+      });
+      props.onClearTargetCreateDate?.();
+    }
+  }, [props.targetCreateDate, props.onClearTargetCreateDate, emptyForm]);
 
   function setField(name: string, value: string) {
     setForm((current) => ({ ...current, [name]: value }));
@@ -506,78 +2173,80 @@ function WorkLogsPage(props: {
 
   return (
     <div className="two-column">
-      <form className="panel form-grid" onSubmit={submit}>
-        <div className="panel-heading full">
+      <form className="panel form-panel-container" onSubmit={submit}>
+        <div className="panel-heading">
           <div>
             <p className="section-eyebrow">每日工作日志</p>
             <h2>{editingId ? "编辑记录" : "新增记录"}</h2>
           </div>
           {editingId && <span className="status-badge">编辑中</span>}
         </div>
-        <p className="form-hint full"><span aria-hidden="true">*</span> 为必填项</p>
-        <p className="form-section-title full">基本信息</p>
-        <label>
-          开始日期
-          <input
-            type="date"
-            value={form.start_date}
-            onChange={(event) => {
-              setForm((current) => ({
-                ...current,
-                start_date: event.target.value,
-                end_date: current.end_date < event.target.value ? event.target.value : current.end_date
-              }));
-            }}
-          />
-        </label>
-        <label>
-          结束日期
-          <input
-            type="date"
-            value={form.end_date}
-            min={form.start_date}
-            onChange={(event) => setField("end_date", event.target.value)}
-          />
-        </label>
-        <label>
-          项目 <em aria-hidden="true">*</em>
-          <input value={form.project} onChange={(event) => setField("project", event.target.value)} required />
-        </label>
-        <label>
-          事项 <em aria-hidden="true">*</em>
-          <input value={form.task} onChange={(event) => setField("task", event.target.value)} required />
-        </label>
-        <label>
-          优先级
-          <select value={form.priority} onChange={(event) => setField("priority", event.target.value)}>
-            <option value="low">低</option>
-            <option value="medium">中</option>
-            <option value="high">高</option>
-            <option value="urgent">紧急</option>
-          </select>
-        </label>
-        <label>
-          工时
-          <input type="number" min="0" max="24" step="0.25" value={form.hours} onChange={(event) => setField("hours", event.target.value)} />
-        </label>
-        <label className="full">
-          进展 <em aria-hidden="true">*</em>
-          <textarea value={form.progress} onChange={(event) => setField("progress", event.target.value)} required />
-        </label>
-        <p className="form-section-title full">复盘与补充</p>
-        <label className="full">
-          结果
-          <textarea value={form.result} onChange={(event) => setField("result", event.target.value)} />
-        </label>
-        <label className="full">
-          阻塞
-          <textarea value={form.blockers} onChange={(event) => setField("blockers", event.target.value)} />
-        </label>
-        <label className="full">
-          备注
-          <textarea value={form.notes} onChange={(event) => setField("notes", event.target.value)} />
-        </label>
-        <div className="button-row">
+        <div className="form-scrollable-content form-grid">
+          <p className="form-hint full"><span aria-hidden="true">*</span> 为必填项</p>
+          <p className="form-section-title full">基本信息</p>
+          <label>
+            开始日期
+            <input
+              type="date"
+              value={form.start_date}
+              onChange={(event) => {
+                setForm((current) => ({
+                  ...current,
+                  start_date: event.target.value,
+                  end_date: current.end_date < event.target.value ? event.target.value : current.end_date
+                }));
+              }}
+            />
+          </label>
+          <label>
+            结束日期
+            <input
+              type="date"
+              value={form.end_date}
+              min={form.start_date}
+              onChange={(event) => setField("end_date", event.target.value)}
+            />
+          </label>
+          <label>
+            项目 <em aria-hidden="true">*</em>
+            <input value={form.project} onChange={(event) => setField("project", event.target.value)} required />
+          </label>
+          <label>
+            事项 <em aria-hidden="true">*</em>
+            <input value={form.task} onChange={(event) => setField("task", event.target.value)} required />
+          </label>
+          <label>
+            优先级
+            <select value={form.priority} onChange={(event) => setField("priority", event.target.value)}>
+              <option value="low">低</option>
+              <option value="medium">中</option>
+              <option value="high">高</option>
+              <option value="urgent">紧急</option>
+            </select>
+          </label>
+          <label>
+            工时
+            <input type="number" min="0" max="24" step="0.25" value={form.hours} onChange={(event) => setField("hours", event.target.value)} />
+          </label>
+          <label className="full">
+            进展 <em aria-hidden="true">*</em>
+            <textarea value={form.progress} onChange={(event) => setField("progress", event.target.value)} required />
+          </label>
+          <p className="form-section-title full">复盘与补充</p>
+          <label className="full">
+            结果
+            <textarea value={form.result} onChange={(event) => setField("result", event.target.value)} />
+          </label>
+          <label className="full">
+            阻塞
+            <textarea value={form.blockers} onChange={(event) => setField("blockers", event.target.value)} />
+          </label>
+          <label className="full">
+            备注
+            <textarea value={form.notes} onChange={(event) => setField("notes", event.target.value)} />
+          </label>
+        </div>
+        <div className="button-row form-fixed-actions">
           <button className="primary" type="submit">
             {editingId ? <Save size={18} /> : <Plus size={18} />}
             {editingId ? "保存修改" : "保存记录"}
@@ -591,82 +2260,139 @@ function WorkLogsPage(props: {
         </div>
       </form>
 
-      <section className="list-panel">
+      <section className="list-panel list-panel-container">
         <div className="list-panel-header">
           <div>
             <p className="section-eyebrow">历史记录</p>
             <h2>工作记录</h2>
           </div>
-          <span className="count-badge">{props.meta.total} 条</span>
-        </div>
-        {props.items.map((item) => (
-          <article className="row-card" key={item.id}>
-            <div>
-              <div className="row-meta">
-                <span className="meta-date">{dateRangeLabel(item)}</span>
-                <span className="meta-project">{item.project}</span>
-                {item.origin === "auto" && <span className="auto-capture-badge">自动采集</span>}
-                <span className={`priority-badge priority-${item.priority}`}>{priorityLabel(item.priority)}</span>
-                {item.hours != null && <span className="hours-badge">{item.hours}h</span>}
-                {item.origin === "auto" && (
-                  <span className="source-count-badge">Git {item.git_commit_count} · Agent {item.agent_session_count}</span>
-                )}
-                {item.pending_evidence_count > 0 && (
-                  <span className="pending-evidence-badge">{item.pending_evidence_count} 条待合并</span>
-                )}
-              </div>
-              <h3>{item.task}</h3>
-              <p>{item.progress}</p>
-              {item.result && <p className="muted">结果：{item.result}</p>}
-              {item.blockers && <p className="warning">阻塞：{item.blockers}</p>}
-            </div>
-            <div className="row-actions">
-              <button className="icon-button" type="button" title="编辑记录" aria-label={`编辑记录：${item.task}`} onClick={() => startEdit(item)}>
-                <Pencil size={16} />
-              </button>
-              <button className="icon-button danger" type="button" title="删除记录" aria-label={`删除记录：${item.task}`} onClick={() => void deleteItem(item)}>
-                <Trash2 size={16} />
-              </button>
-            </div>
-          </article>
-        ))}
-        {props.items.length === 0 && (
-          <div className="empty-state">
-            <ClipboardList size={28} />
-            <div>
-              <strong>还没有工作记录</strong>
-              <p>从左侧填写今天的进展，记录会保存在这里。</p>
-            </div>
+          <div className="list-panel-header-actions">
+            <button
+              className="secondary compact ai-dialog-trigger"
+              type="button"
+              onClick={() => setAiDialogOpen(true)}
+            >
+              <Sparkles size={15} />
+              AI 对话修改记录
+            </button>
+            <span className="count-badge">{props.meta.total} 条</span>
           </div>
-        )}
-        <div className="pagination">
+        </div>
+        <div className="list-panel-scrollable-items">
+          {props.items.map((item) => (
+            <article className="row-card" key={item.id}>
+              <div>
+                <div className="row-meta">
+                  <span className="meta-date">{dateRangeLabel(item)}</span>
+                  <span className="meta-project">{item.project}</span>
+                  {item.origin === "auto" && <span className="auto-capture-badge">自动采集</span>}
+                  <span className={`priority-badge priority-${item.priority}`}>{priorityLabel(item.priority)}</span>
+                  {item.hours != null && <span className="hours-badge">{item.hours}h</span>}
+                  {item.origin === "auto" && (
+                    <span className="source-count-badge">Git {item.git_commit_count} · Agent {item.agent_session_count}</span>
+                  )}
+                  {item.pending_evidence_count > 0 && (
+                    <span className="pending-evidence-badge">{item.pending_evidence_count} 条待合并</span>
+                  )}
+                </div>
+                <h3>{item.task}</h3>
+                <p>{item.progress}</p>
+                {item.result && <p className="muted">结果：{item.result}</p>}
+                {item.blockers && <p className="warning">阻塞：{item.blockers}</p>}
+              </div>
+              <div className="row-actions">
+                <button className="icon-button" type="button" title="编辑记录" aria-label={`编辑记录：${item.task}`} onClick={() => startEdit(item)}>
+                  <Pencil size={16} />
+                </button>
+                <button className="icon-button danger" type="button" title="删除记录" aria-label={`删除记录：${item.task}`} onClick={() => void deleteItem(item)}>
+                  <Trash2 size={16} />
+                </button>
+              </div>
+            </article>
+          ))}
+          {props.items.length === 0 && (
+            <div className="empty-state">
+              <ClipboardList size={28} />
+              <div>
+                <strong>还没有工作记录</strong>
+                <p>从左侧填写今天的进展，记录会保存在这里。</p>
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="pagination fixed-pagination">
           <span>
             共 {props.meta.total} 条 · 第 {props.meta.page} / {props.meta.total_pages} 页
           </span>
-          <select value={props.pageSize} onChange={(event) => props.onPageSizeChange(Number(event.target.value))}>
-            <option value={5}>5 条/页</option>
-            <option value={10}>10 条/页</option>
-            <option value={20}>20 条/页</option>
-            <option value={50}>50 条/页</option>
-          </select>
-          <button
-            className="secondary"
-            type="button"
-            disabled={props.meta.page <= 1}
-            onClick={() => props.onPageChange(props.meta.page - 1)}
-          >
-            上一页
-          </button>
-          <button
-            className="secondary"
-            type="button"
-            disabled={props.meta.page >= props.meta.total_pages}
-            onClick={() => props.onPageChange(props.meta.page + 1)}
-          >
-            下一页
-          </button>
+          <div className="pagination-controls">
+            <select value={props.pageSize} onChange={(event) => props.onPageSizeChange(Number(event.target.value))}>
+              <option value={5}>5 条/页</option>
+              <option value={10}>10 条/页</option>
+              <option value={20}>20 条/页</option>
+              <option value={50}>50 条/页</option>
+            </select>
+            <button
+              className="secondary compact"
+              type="button"
+              disabled={props.meta.page <= 1}
+              onClick={() => props.onPageChange(props.meta.page - 1)}
+            >
+              上一页
+            </button>
+            <button
+              className="secondary compact"
+              type="button"
+              disabled={props.meta.page >= props.meta.total_pages}
+              onClick={() => props.onPageChange(props.meta.page + 1)}
+            >
+              下一页
+            </button>
+          </div>
         </div>
       </section>
+
+      {aiDialogOpen && (
+        <WorkLogAiDialogueDialog
+          isOpen={aiDialogOpen}
+          onClose={() => setAiDialogOpen(false)}
+          items={props.items}
+          currentEditingId={editingId}
+          onApplyModification={async (logId, payload) => {
+            await props.onUpdate(logId, payload);
+            if (editingId === logId) {
+              setForm((current) => ({
+                ...current,
+                start_date: payload.start_date ?? current.start_date,
+                end_date: payload.end_date ?? current.end_date,
+                project: payload.project ?? current.project,
+                task: payload.task ?? current.task,
+                progress: payload.progress ?? current.progress,
+                result: payload.result !== undefined ? (payload.result ?? "") : current.result,
+                blockers: payload.blockers !== undefined ? (payload.blockers ?? "") : current.blockers,
+                hours: payload.hours !== undefined ? (payload.hours != null ? String(payload.hours) : "") : current.hours,
+                priority: (payload.priority as Priority) ?? current.priority,
+                notes: payload.notes !== undefined ? (payload.notes ?? "") : current.notes,
+              }));
+            }
+          }}
+          onLoadIntoForm={(payload, logId) => {
+            setEditingId(logId);
+            setForm({
+              start_date: payload.start_date ?? today(),
+              end_date: payload.end_date ?? today(),
+              project: payload.project ?? "",
+              task: payload.task ?? "",
+              progress: payload.progress ?? "",
+              result: payload.result ?? "",
+              blockers: payload.blockers ?? "",
+              hours: payload.hours != null ? String(payload.hours) : "",
+              priority: (payload.priority as Priority) ?? "medium",
+              notes: payload.notes ?? "",
+            });
+          }}
+          onOpenSettings={props.onOpenSettings}
+        />
+      )}
     </div>
   );
 }
@@ -960,7 +2686,7 @@ function ReportsPage(props: {
       </section>
 
       <div className="report-grid">
-        <section className="list-panel">
+        <section className="list-panel report-list-container">
           <div className="list-panel-header">
             <div>
               <p className="section-eyebrow">已生成内容</p>
@@ -968,31 +2694,33 @@ function ReportsPage(props: {
             </div>
             <span className="count-badge">{props.reports.length} 份</span>
           </div>
-          {props.reports.map((item) => (
-            <button
-              type="button"
-              className={selected?.id === item.id ? "report-item active" : "report-item"}
-              key={item.id}
-              onClick={() => setSelectedId(item.id)}
-            >
-              <strong>{item.title}</strong>
-              <span className="report-item-meta"><b>{reportLabels[item.report_type]}</b>{item.period_start} 至 {item.period_end}</span>
-            </button>
-          ))}
-          {props.reports.length === 0 && (
-            <div className="empty-state report-empty-state">
-              <FileText size={28} />
-              <div>
-                <strong>还没有报告草稿</strong>
-                <p>选择报告类型与参考日期，即可生成第一份草稿。</p>
+          <div className="report-items-scroll">
+            {props.reports.map((item) => (
+              <button
+                type="button"
+                className={selected?.id === item.id ? "report-item active" : "report-item"}
+                key={item.id}
+                onClick={() => setSelectedId(item.id)}
+              >
+                <strong>{item.title}</strong>
+                <span className="report-item-meta"><b>{reportLabels[item.report_type]}</b>{item.period_start} 至 {item.period_end}</span>
+              </button>
+            ))}
+            {props.reports.length === 0 && (
+              <div className="empty-state report-empty-state">
+                <FileText size={28} />
+                <div>
+                  <strong>还没有报告草稿</strong>
+                  <p>选择报告类型与参考日期，即可生成第一份草稿。</p>
+                </div>
+                <div className="empty-steps" aria-label="生成报告步骤">
+                  <span>选择类型</span>
+                  <span>确认日期</span>
+                  <span>生成草稿</span>
+                </div>
               </div>
-              <div className="empty-steps" aria-label="生成报告步骤">
-                <span>选择类型</span>
-                <span>确认日期</span>
-                <span>生成草稿</span>
-              </div>
-            </div>
-          )}
+            )}
+          </div>
         </section>
 
         {selected && (
@@ -2223,8 +3951,8 @@ function TemplatesPage(props: {
   }
 
   return (
-    <div className="report-grid">
-      <section className="list-panel">
+    <div className="report-grid templates-layout">
+      <section className="list-panel template-list-container">
         <div className="list-panel-header">
           <div>
             <p className="section-eyebrow">可复用格式</p>
@@ -2232,19 +3960,21 @@ function TemplatesPage(props: {
           </div>
           <span className="count-badge">{props.templates.length} 个</span>
         </div>
-        <button className={selectedId === "new" ? "report-item active" : "report-item"} type="button" onClick={() => setSelectedId("new")}>
-          <strong>新建模板</strong>
-          <span className="report-item-meta"><b>自定义</b>Markdown + Jinja 变量</span>
-        </button>
-        {props.templates.map((item) => (
-          <button className={selected?.id === item.id ? "report-item active" : "report-item"} type="button" key={item.id} onClick={() => setSelectedId(item.id)}>
-            <strong>{item.name}</strong>
-            <span className="report-item-meta"><b>{reportLabels[item.template_type]}</b>{item.is_default ? "默认模板" : "自定义模板"}</span>
+        <div className="template-items-scroll">
+          <button className={selectedId === "new" ? "report-item active" : "report-item"} type="button" onClick={() => setSelectedId("new")}>
+            <strong>新建模板</strong>
+            <span className="report-item-meta"><b>自定义</b>Markdown + Jinja 变量</span>
           </button>
-        ))}
+          {props.templates.map((item) => (
+            <button className={selected?.id === item.id ? "report-item active" : "report-item"} type="button" key={item.id} onClick={() => setSelectedId(item.id)}>
+              <strong>{item.name}</strong>
+              <span className="report-item-meta"><b>{reportLabels[item.template_type]}</b>{item.is_default ? "默认模板" : "自定义模板"}</span>
+            </button>
+          ))}
+        </div>
       </section>
 
-      <section className="template-editor form-grid">
+      <section className="template-editor template-editor-container">
         <div className="panel-heading full">
           <div>
             <p className="section-eyebrow">模板编辑器</p>
@@ -2252,10 +3982,11 @@ function TemplatesPage(props: {
           </div>
           {selected?.is_default && <span className="status-badge">默认模板</span>}
         </div>
-        <label>
-          模板名称
-          <input value={form.name} onChange={(event) => setField("name", event.target.value)} />
-        </label>
+        <div className="template-editor-scroll form-grid">
+          <label>
+            模板名称
+            <input value={form.name} onChange={(event) => setField("name", event.target.value)} />
+          </label>
         <label>
           类型
           <select value={form.template_type} onChange={(event) => setField("template_type", event.target.value)}>
@@ -2355,7 +4086,8 @@ function TemplatesPage(props: {
             <small>AI 会生成候选版本；对比新旧差异并选择应用后，才会回填编辑器。</small>
           </div>
         </div>
-        <div className="button-row">
+        </div>
+        <div className="button-row template-fixed-actions">
           <button
             className="primary"
             type="button"
@@ -2478,6 +4210,7 @@ function SettingsPage(props: {
   onSetLaunchAtLogin: (enabled: boolean) => Promise<void>;
   onImportLegacy: () => Promise<void>;
 }) {
+  const [activeSubTab, setActiveSubTab] = React.useState<"llm" | "capture" | "schedules" | "recipients" | "desktop">("llm");
   const [form, setForm] = React.useState<LlmSetting>({
     provider: "openai",
     base_url: providerDefaults.openai.base_url,
@@ -2488,6 +4221,8 @@ function SettingsPage(props: {
   });
   const [headersText, setHeadersText] = React.useState("{}");
   const [headersError, setHeadersError] = React.useState("");
+  const [gatewayStatus, setGatewayStatus] = React.useState("");
+  const [gatewayChecking, setGatewayChecking] = React.useState(false);
   const activeProviderLabel = props.setting ? providerLabels[props.setting.provider] : "未配置";
   const formSetting = props.settings.find((item) => item.id === form.id);
   const apiKeyPlaceholder = formSetting?.api_key
@@ -2512,12 +4247,14 @@ function SettingsPage(props: {
   ]);
 
   function loadSavedSetting(setting: LlmSetting) {
+    setGatewayStatus("");
     setForm({ ...setting, api_key: "" });
     setHeadersText(JSON.stringify(setting.extra_headers ?? {}, null, 2));
     setHeadersError("");
   }
 
   function setProvider(provider: Provider) {
+    setGatewayStatus("");
     const extra_headers: Record<string, string> = {};
     setForm((current) => ({
       ...current,
@@ -2570,6 +4307,21 @@ function SettingsPage(props: {
     await props.onSave({ ...form, extra_headers });
   }
 
+  async function checkGateway() {
+    if (!form.id || gatewayChecking) return;
+    setGatewayChecking(true);
+    setGatewayStatus("");
+    try {
+      const result = await api.testXcliConnection(form.id);
+      const location = { local: "本机推理", remote: "转发云端", unknown: "推理位置未知，按云端处理" }[result.inference_location];
+      setGatewayStatus(`已保存配置可连接：${result.model}；${location}。未调用模型。`);
+    } catch (error) {
+      setGatewayStatus(typeof error === "string" ? error : error instanceof Error ? error.message : "网关检查失败");
+    } finally {
+      setGatewayChecking(false);
+    }
+  }
+
   async function removeSavedSetting(setting: LlmSetting) {
     if (!setting.id || setting.is_active) {
       return;
@@ -2585,201 +4337,265 @@ function SettingsPage(props: {
   }
 
   return (
-    <div className="settings-stack">
-      <section className="panel settings-panel desktop-settings-panel">
-        <div className="settings-intro">
-          <p className="section-eyebrow">桌面应用</p>
-          <h2>本地运行</h2>
-          <p>关闭主窗口后 Worklog 会留在系统托盘，定时报告仍会继续执行。</p>
-          <div className="settings-side-note">
-            <span>数据库位置</span>
-            <strong className="path-value">{props.desktopPreferences?.database_path ?? "正在读取"}</strong>
-            <p>{props.migrationResult?.imported ? `已从 ${props.migrationResult.source_path ?? "旧版本"} 自动迁移` : "数据保存在操作系统应用数据目录。"}</p>
-          </div>
-        </div>
-        <div className="settings-section">
-          <label className="toggle">
-            <input
-              type="checkbox"
-              checked={Boolean(props.desktopPreferences?.launch_at_login)}
-              onChange={(event) => void props.onSetLaunchAtLogin(event.target.checked)}
-            />
-            登录电脑后自动启动 Worklog
-          </label>
-          <p className="form-hint">未自动发现旧版数据时，可手动选择原来的 worklog.db；已有新数据后将禁止覆盖导入。</p>
-          <button className="secondary" type="button" onClick={() => void props.onImportLegacy()}>
-            <Download size={16} />
-            导入旧版数据库
-          </button>
-        </div>
-      </section>
-      <form className="panel settings-panel" onSubmit={(event) => void save(event)}>
-        <div className="settings-intro">
-          <p className="section-eyebrow">本地配置</p>
-          <h2>LLM 设置</h2>
-          <p>配置一个兼容 OpenAI API 的服务，用于生成报告和从示例提炼模板。</p>
-          <div className="settings-side-note">
-            <span>当前应用</span>
-            <strong>{activeProviderLabel}{props.setting ? ` / ${props.setting.model}` : ""}</strong>
-            <p>保存并应用后，报告生成和模板提炼会立即使用这一组配置。各 Provider 的密钥独立保留。</p>
-          </div>
-        </div>
+    <div className="settings-page-wrapper">
+      <div className="settings-subtabs-bar">
+        <button
+          type="button"
+          className={`settings-subtab-btn ${activeSubTab === "llm" ? "active" : ""}`}
+          onClick={() => setActiveSubTab("llm")}
+        >
+          <Cpu size={15} />
+          <span>AI 模型配置</span>
+        </button>
+        <button
+          type="button"
+          className={`settings-subtab-btn ${activeSubTab === "capture" ? "active" : ""}`}
+          onClick={() => setActiveSubTab("capture")}
+        >
+          <Radio size={15} />
+          <span>每日活动采集</span>
+        </button>
+        <button
+          type="button"
+          className={`settings-subtab-btn ${activeSubTab === "schedules" ? "active" : ""}`}
+          onClick={() => setActiveSubTab("schedules")}
+        >
+          <Clock size={15} />
+          <span>定时与邮件</span>
+        </button>
+        <button
+          type="button"
+          className={`settings-subtab-btn ${activeSubTab === "recipients" ? "active" : ""}`}
+          onClick={() => setActiveSubTab("recipients")}
+        >
+          <Users size={15} />
+          <span>常用收件人</span>
+        </button>
+        <button
+          type="button"
+          className={`settings-subtab-btn ${activeSubTab === "desktop" ? "active" : ""}`}
+          onClick={() => setActiveSubTab("desktop")}
+        >
+          <Settings size={15} />
+          <span>偏好与系统</span>
+        </button>
+      </div>
 
-        <section className="settings-section saved-llm-section">
-          <div className="saved-llm-header">
-            <div>
-              <h3>已保存 LLM 配置</h3>
-              <p>这些配置会保留在本地；点击“应用”后，生成报告和模板会使用对应配置。</p>
+      <div className="settings-subtab-viewport">
+        {activeSubTab === "desktop" && (
+          <section className="panel settings-panel desktop-settings-panel">
+            <div className="settings-intro">
+              <p className="section-eyebrow">桌面应用</p>
+              <h2>本地运行</h2>
+              <p>关闭主窗口后 Worklog 会留在系统托盘，定时报告仍会继续执行。</p>
+              <div className="settings-side-note">
+                <span>数据库位置</span>
+                <strong className="path-value">{props.desktopPreferences?.database_path ?? "正在读取"}</strong>
+                <p>{props.migrationResult?.imported ? `已从 ${props.migrationResult.source_path ?? "旧版本"} 自动迁移` : "数据保存在操作系统应用数据目录。"}</p>
+              </div>
             </div>
-            <div className="saved-llm-header-actions">
-              <span className="count-badge">{props.settings.length} 个</span>
-              <button className="secondary" type="button" onClick={startNewSetting}>
-                <Plus size={16} />
-                新增配置
+            <div className="settings-section">
+              <label className="toggle">
+                <input
+                  type="checkbox"
+                  checked={Boolean(props.desktopPreferences?.launch_at_login)}
+                  onChange={(event) => void props.onSetLaunchAtLogin(event.target.checked)}
+                />
+                登录电脑后自动启动 Worklog
+              </label>
+              <p className="form-hint">未自动发现旧版数据时，可手动选择原来的 worklog.db；已有新数据后将禁止覆盖导入。</p>
+              <button className="secondary" type="button" onClick={() => void props.onImportLegacy()}>
+                <Download size={16} />
+                导入旧版数据库
               </button>
             </div>
-          </div>
-          {props.settings.length ? (
-            <div className="saved-llm-list">
-              {props.settings.map((item) => (
-                <div className={item.is_active ? "saved-llm-item active" : "saved-llm-item"} key={item.id}>
-                  <button className="saved-llm-main" type="button" onClick={() => loadSavedSetting(item)}>
-                    <strong>{providerLabels[item.provider]} / {item.model}</strong>
-                    <span>{item.base_url}</span>
-                    <small>{item.api_key ? `Key ${item.api_key}` : "未保存 API Key"}</small>
-                    <small>请求超时 {item.timeout_seconds} 秒</small>
-                  </button>
-                  <div className="saved-llm-actions">
-                    {item.is_active && <span className="status-badge">当前应用</span>}
-                    <button className="secondary" type="button" onClick={() => loadSavedSetting(item)}>
-                      编辑
-                    </button>
-                    <button
-                      className="primary"
-                      type="button"
-                      disabled={Boolean(item.is_active) || !item.id}
-                      onClick={() => item.id && void props.onApplyLlmSetting(item.id)}
-                    >
-                      应用
-                    </button>
-                    <button
-                      className="icon-button danger"
-                      type="button"
-                      disabled={Boolean(item.is_active) || !item.id}
-                      title={item.is_active ? "当前应用的配置不能删除，请先应用其他配置" : "删除配置"}
-                      aria-label={`删除 ${providerLabels[item.provider]} ${item.model} 配置`}
-                      onClick={() => void removeSavedSetting(item)}
-                    >
-                      <Trash2 size={16} />
-                    </button>
-                  </div>
-                </div>
-              ))}
+          </section>
+        )}
+
+        {activeSubTab === "llm" && (
+          <form className="panel settings-panel" onSubmit={(event) => void save(event)}>
+            <div className="settings-intro">
+              <p className="section-eyebrow">本地配置</p>
+              <h2>LLM 设置</h2>
+              <p>配置一个兼容 OpenAI API 的服务，用于生成报告和从示例提炼模板。</p>
+              <div className="settings-side-note">
+                <span>当前应用</span>
+                <strong>{activeProviderLabel}{props.setting ? ` / ${props.setting.model}` : ""}</strong>
+                <p>保存并应用后，报告生成和模板提炼会立即使用这一组配置。各 Provider 的密钥独立保留。</p>
+              </div>
             </div>
-          ) : (
-            <p className="empty-hint">还没有保存过 LLM 配置。</p>
-          )}
-        </section>
 
-        <fieldset className="settings-section">
-          <legend>模型服务</legend>
-          <p>切换服务商会自动填入推荐的 Base URL 与模型名称，你仍可按实际环境调整。</p>
-          <div className="settings-grid">
-            <label>
-              Provider
-              <select value={form.provider} onChange={(event) => setProvider(event.target.value as Provider)}>
-                <option value="openai">OpenAI</option>
-                <option value="nvidia">NVIDIA</option>
-                <option value="openrouter">OpenRouter</option>
-                <option value="minimax">MiniMax（国内）</option>
-                <option value="bailian">阿里云百炼（国内）</option>
-              </select>
-            </label>
-            <label>
-              Model
-              <input value={form.model} onChange={(event) => setForm({ ...form, model: event.target.value })} />
-            </label>
-            <label className="full">
-              Base URL
-              <input value={form.base_url} onChange={(event) => setForm({ ...form, base_url: event.target.value })} />
-            </label>
-            <label>
-              请求超时（秒）
-              <input
-                type="number"
-                min={5}
-                max={600}
-                step={5}
-                required
-                value={form.timeout_seconds}
-                onChange={(event) => setForm({ ...form, timeout_seconds: Number(event.target.value) })}
-              />
-            </label>
+            <section className="settings-section saved-llm-section">
+              <div className="saved-llm-header">
+                <div>
+                  <h3>已保存 LLM 配置</h3>
+                  <p>这些配置会保留在本地；点击“应用”后，生成报告和模板会使用对应配置。</p>
+                </div>
+                <div className="saved-llm-header-actions">
+                  <span className="count-badge">{props.settings.length} 个</span>
+                  <button className="secondary" type="button" onClick={startNewSetting}>
+                    <Plus size={16} />
+                    新增配置
+                  </button>
+                </div>
+              </div>
+              {props.settings.length ? (
+                <div className="saved-llm-list">
+                  {props.settings.map((item) => (
+                    <div className={item.is_active ? "saved-llm-item active" : "saved-llm-item"} key={item.id}>
+                      <button className="saved-llm-main" type="button" onClick={() => loadSavedSetting(item)}>
+                        <strong>{providerLabels[item.provider]} / {item.model}</strong>
+                        <span>{item.base_url}</span>
+                        <small>{item.api_key ? `Key ${item.api_key}` : "未保存 API Key"}</small>
+                        <small>请求超时 {item.timeout_seconds} 秒</small>
+                      </button>
+                      <div className="saved-llm-actions">
+                        {item.is_active && <span className="status-badge">当前应用</span>}
+                        <button className="secondary" type="button" onClick={() => loadSavedSetting(item)}>
+                          编辑
+                        </button>
+                        <button
+                          className="primary"
+                          type="button"
+                          disabled={Boolean(item.is_active) || !item.id}
+                          onClick={() => item.id && void props.onApplyLlmSetting(item.id)}
+                        >
+                          应用
+                        </button>
+                        <button
+                          className="icon-button danger"
+                          type="button"
+                          disabled={Boolean(item.is_active) || !item.id}
+                          title={item.is_active ? "当前应用的配置不能删除，请先应用其他配置" : "删除配置"}
+                          aria-label={`删除 ${providerLabels[item.provider]} ${item.model} 配置`}
+                          onClick={() => void removeSavedSetting(item)}
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="empty-hint">还没有保存过 LLM 配置。</p>
+              )}
+            </section>
+
+            <fieldset className="settings-section">
+              <legend>模型服务</legend>
+              <p>切换服务商会自动填入推荐的 Base URL 与模型名称，你仍可按实际环境调整。</p>
+              <div className="settings-grid">
+                <label>
+                  Provider
+                  <select value={form.provider} onChange={(event) => setProvider(event.target.value as Provider)}>
+                    <option value="openai">OpenAI</option>
+                    <option value="xcli">xcli 本机网关</option>
+                    <option value="nvidia">NVIDIA</option>
+                    <option value="openrouter">OpenRouter</option>
+                    <option value="minimax">MiniMax（国内）</option>
+                    <option value="bailian">阿里云百炼（国内）</option>
+                  </select>
+                </label>
+                <label>
+                  Model
+                  <input value={form.model} onChange={(event) => setForm({ ...form, model: event.target.value })} />
+                </label>
+                <label className="full">
+                  Base URL
+                  <input value={form.base_url} onChange={(event) => setForm({ ...form, base_url: event.target.value })} />
+                </label>
+                <label>
+                  请求超时（秒）
+                  <input
+                    type="number"
+                    min={5}
+                    max={600}
+                    step={5}
+                    required
+                    value={form.timeout_seconds}
+                    onChange={(event) => setForm({ ...form, timeout_seconds: Number(event.target.value) })}
+                  />
+                </label>
+              </div>
+            </fieldset>
+
+            <fieldset className="settings-section">
+              <legend>认证与扩展</legend>
+              <p>API Key 仅在填写新值时更新；保留为空可继续使用当前已保存的密钥。</p>
+              <p>切换 Provider 后留空 API Key 时，只会复用该 Provider 之前保存过的密钥。</p>
+              <div className="settings-grid">
+                <label className="full">
+                  API Key
+                  <input
+                    type="password"
+                    placeholder={apiKeyPlaceholder}
+                    value={form.api_key ?? ""}
+                    onChange={(event) => setForm({ ...form, api_key: event.target.value })}
+                  />
+                </label>
+                <label className="full">
+                  Extra Headers JSON
+                  <textarea
+                    aria-describedby={headersError ? "headers-error" : undefined}
+                    aria-invalid={Boolean(headersError)}
+                    value={headersText}
+                    onChange={(event) => {
+                      setHeadersText(event.target.value);
+                      setHeadersError("");
+                    }}
+                  />
+                </label>
+                {headersError && <p className="field-error full" id="headers-error" role="alert">{headersError}</p>}
+              </div>
+            </fieldset>
+
+            <div className="button-row settings-actions">
+              {form.provider === "xcli" && <button className="secondary" type="button" disabled={!form.id || gatewayChecking} onClick={() => void checkGateway()}>{gatewayChecking ? "正在检查…" : "检查已保存网关（不调用模型）"}</button>}
+              <button className="primary" type="submit">
+                <Save size={18} />
+                {form.id ? "保存并应用修改" : "保存并应用新配置"}
+              </button>
+            </div>
+            {form.provider === "xcli" && <p className="form-hint" role="status">{gatewayStatus || "填写 xcli 独立应用 Token。网关在本机，上游推理可能在云端；先保存配置再检查。"}</p>}
+          </form>
+        )}
+
+        {activeSubTab === "capture" && (
+          <DailyCapturePanel
+            sources={props.activitySources}
+            candidates={props.activityCandidates}
+            settings={props.dailyCaptureSettings}
+            runs={props.dailyCaptureRuns}
+            onCreateSource={props.onCreateActivitySource}
+            onUpdateSource={props.onUpdateActivitySource}
+            onDeleteSource={props.onDeleteActivitySource}
+            onSaveSettings={props.onSaveDailyCaptureSettings}
+            onRun={props.onRunDailyCapture}
+          />
+        )}
+
+        {activeSubTab === "schedules" && (
+          <div className="settings-stack">
+            <ReportSchedulesPanel
+              schedules={props.reportSchedules}
+              templates={props.templates}
+              emailSetting={props.emailSetting}
+              recipients={props.recipients}
+              onSave={props.onSaveReportSchedule}
+            />
+            <EmailSettingsPanel setting={props.emailSetting} onSave={props.onSaveEmail} onTest={props.onTestEmail} />
           </div>
-        </fieldset>
+        )}
 
-        <fieldset className="settings-section">
-          <legend>认证与扩展</legend>
-          <p>API Key 仅在填写新值时更新；保留为空可继续使用当前已保存的密钥。</p>
-          <p>切换 Provider 后留空 API Key 时，只会复用该 Provider 之前保存过的密钥。</p>
-          <div className="settings-grid">
-            <label className="full">
-              API Key
-              <input
-                type="password"
-                placeholder={apiKeyPlaceholder}
-                value={form.api_key ?? ""}
-                onChange={(event) => setForm({ ...form, api_key: event.target.value })}
-              />
-            </label>
-            <label className="full">
-              Extra Headers JSON
-              <textarea
-                aria-describedby={headersError ? "headers-error" : undefined}
-                aria-invalid={Boolean(headersError)}
-                value={headersText}
-                onChange={(event) => {
-                  setHeadersText(event.target.value);
-                  setHeadersError("");
-                }}
-              />
-            </label>
-            {headersError && <p className="field-error full" id="headers-error" role="alert">{headersError}</p>}
-          </div>
-        </fieldset>
-
-        <div className="button-row settings-actions">
-          <button className="primary" type="submit">
-            <Save size={18} />
-            {form.id ? "保存并应用修改" : "保存并应用新配置"}
-          </button>
-        </div>
-      </form>
-      <DailyCapturePanel
-        sources={props.activitySources}
-        candidates={props.activityCandidates}
-        settings={props.dailyCaptureSettings}
-        runs={props.dailyCaptureRuns}
-        onCreateSource={props.onCreateActivitySource}
-        onUpdateSource={props.onUpdateActivitySource}
-        onDeleteSource={props.onDeleteActivitySource}
-        onSaveSettings={props.onSaveDailyCaptureSettings}
-        onRun={props.onRunDailyCapture}
-      />
-      <ReportSchedulesPanel
-        schedules={props.reportSchedules}
-        templates={props.templates}
-        emailSetting={props.emailSetting}
-        recipients={props.recipients}
-        onSave={props.onSaveReportSchedule}
-      />
-      <EmailSettingsPanel setting={props.emailSetting} onSave={props.onSaveEmail} onTest={props.onTestEmail} />
-      <RecipientDirectory
-        recipients={props.recipients}
-        onCreate={props.onCreateRecipient}
-        onUpdate={props.onUpdateRecipient}
-        onDelete={props.onDeleteRecipient}
-      />
+        {activeSubTab === "recipients" && (
+          <RecipientDirectory
+            recipients={props.recipients}
+            onCreate={props.onCreateRecipient}
+            onUpdate={props.onUpdateRecipient}
+            onDelete={props.onDeleteRecipient}
+          />
+        )}
+      </div>
     </div>
   );
 }

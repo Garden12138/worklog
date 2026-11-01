@@ -26,7 +26,7 @@ pub struct WorkLog {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkLogInput {
     pub work_date: Option<String>,
     pub start_date: Option<String>,
@@ -39,6 +39,44 @@ pub struct WorkLogInput {
     pub hours: Option<f64>,
     pub priority: Option<String>,
     pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FieldChange {
+    pub field: String,
+    pub label: String,
+    pub old_value: Option<String>,
+    pub new_value: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkLogModificationAction {
+    pub log_id: i64,
+    pub original: WorkLogInput,
+    pub updated: WorkLogInput,
+    pub changes_summary: Vec<FieldChange>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkLogDialogueResponse {
+    pub reply: String,
+    pub action: Option<WorkLogModificationAction>,
+    pub actions: Vec<WorkLogModificationAction>,
+    pub used_llm: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChatModifyWorkLogInput {
+    pub messages: Vec<ChatMessage>,
+    pub current_editing_id: Option<i64>,
+    pub target_log_id: Option<i64>,
+    pub target_log_ids: Option<Vec<i64>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -493,4 +531,31 @@ pub struct DailyWorkSummary {
     pub progress: String,
     pub result: Option<String>,
     pub blockers: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DailyWorkStat {
+    pub date: String,
+    pub day_name: String,
+    pub total_hours: f64,
+    pub task_count: i64,
+    pub is_today: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectHourStat {
+    pub project: String,
+    pub hours: f64,
+    pub percentage: f64,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkReportSummary {
+    pub week_total_hours: f64,
+    pub week_avg_hours: f64,
+    pub active_days: i64,
+    pub total_tasks: i64,
+    pub daily_stats: Vec<DailyWorkStat>,
+    pub top_projects: Vec<ProjectHourStat>,
 }

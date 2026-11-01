@@ -1,6 +1,6 @@
 export type ReportType = "weekly_report" | "monthly_report" | "performance_review";
 export type Priority = "low" | "medium" | "high" | "urgent";
-export type Provider = "openai" | "nvidia" | "openrouter" | "minimax" | "bailian";
+export type Provider = "xcli" | "openai" | "nvidia" | "openrouter" | "minimax" | "bailian";
 export type ActivitySourceType = "git" | "codex" | "cursor";
 export type EmailSecurity = "starttls" | "ssl";
 export type EmailDeliveryStatus = "pending" | "sent" | "failed";
@@ -35,6 +35,32 @@ export interface PaginatedWorkLogs {
   page: number;
   page_size: number;
   total_pages: number;
+}
+
+export interface ChatMessage {
+  role: "user" | "assistant" | "system";
+  content: string;
+}
+
+export interface FieldChange {
+  field: string;
+  label: string;
+  old_value?: string | null;
+  new_value?: string | null;
+}
+
+export interface WorkLogModificationAction {
+  log_id: number;
+  original: Partial<WorkLog>;
+  updated: Partial<WorkLog>;
+  changes_summary: FieldChange[];
+}
+
+export interface WorkLogDialogueResponse {
+  reply: string;
+  action?: WorkLogModificationAction | null;
+  actions: WorkLogModificationAction[];
+  used_llm: boolean;
 }
 
 export interface Template {
@@ -225,4 +251,28 @@ export interface ActivityEvidence {
   metadata_json: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface DailyWorkStat {
+  date: string;
+  day_name: string;
+  total_hours: number;
+  task_count: number;
+  is_today: boolean;
+}
+
+export interface ProjectHourStat {
+  project: string;
+  hours: number;
+  percentage: number;
+  count: number;
+}
+
+export interface WorkReportSummary {
+  week_total_hours: number;
+  week_avg_hours: number;
+  active_days: number;
+  total_tasks: number;
+  daily_stats: DailyWorkStat[];
+  top_projects: ProjectHourStat[];
 }

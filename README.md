@@ -1,10 +1,16 @@
 # Worklog Desktop
 
+## xcli Model Gateway
+
+在 LLM 设置中选择 `xcli 本机网关`，填写已启动网关的 `/v1` 地址、模型别名和为 Worklog 单独签发的应用 Token。默认地址为 `http://127.0.0.1:18741/v1`，端口可修改；只允许明确的本机 IP，不使用原生 Agent CLI 会员凭据。
+
+保存后可点击“检查已保存网关（不调用模型）”，读取授权模型目录及实际上游推理位置，不发起生成请求。网关位于本机不代表推理位于本机；`remote/unknown` 路由需要该 Token 在网关侧具备相应权限。日报、周报与模板继续使用原有业务 Prompt；缺少模型、Token 失效、配额或连接错误会明确失败，不自动换供应商。其他服务商配置和无模型配置时的原有回退继续保留。
+
 Worklog 2.0 是使用 Tauri 2、Rust、React 和 SQLite 构建的本地桌面工作记录与报告应用。安装后不需要 Python、Node.js 或后台 HTTP 服务。
 
 ## 功能
 
-- 每日工作记录、分页浏览与项目/工时/优先级管理。
+- 每日工作记录、分页浏览、自然语言对话修改记录与项目/工时/优先级管理。
 - 周报、月报和绩效考核表草稿生成、编辑、AI 优化及 DOCX 导出。
 - Markdown + Jinja 风格模板管理，并可使用 LLM 从示例生成或优化模板。
 - OpenAI、NVIDIA、OpenRouter、国内 MiniMax M3 等 OpenAI-compatible LLM Provider。
@@ -48,7 +54,7 @@ LLM API Key 和 SMTP 密码会从旧数据库迁移到 macOS Keychain 或 Window
 
 ### 3. 记录每日工作
 
-进入“每日记录”，填写日期、项目、事项和进展；结果、阻塞、工时、优先级与备注可按需填写。保存后的记录会作为报告生成的数据来源，并可随时编辑或删除。
+进入“每日记录”，填写日期、项目、事项和进展；结果、阻塞、工时、优先级与备注可按需填写。也可点击“AI 对话修改记录”或记录卡片上的 AI 按钮，通过自然语言对话智能调整工时、追加进展、清空阻塞或润色记录，支持差异对比确认、一键载入表单或自动保存。保存后的记录会作为报告生成的数据来源，并可随时编辑或删除。
 
 ### 4. 生成和编辑报告
 
@@ -144,8 +150,8 @@ npm run tauri -- build --target x86_64-pc-windows-msvc --bundles nsis
 发布新版本：
 
 ```bash
-git tag v2.0.6
-git push origin refs/tags/v2.0.6
+git tag v2.0.7
+git push origin refs/tags/v2.0.7
 ```
 
 请将示例版本号替换为本次发布版本。如果版本分支与标签同名，请保留完整的 `refs/tags/...` 写法，避免 Git 无法判断要推送分支还是标签。重新运行同一标签的工作流时，会更新该 Release 中的同名安装包，而不会重复创建 Release。
