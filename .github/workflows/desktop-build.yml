@@ -93,6 +93,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download packaged applications
         uses: actions/download-artifact@v4
         with:
@@ -115,16 +120,31 @@ jobs:
             exit 1
           fi
 
+          # Extract release notes from annotated git tag or notes file
+          TAG_NOTES=$(git tag -l --format='%(contents)' "$RELEASE_TAG" | sed -e :a -e '/^\n*$/{$d;N;};/\n$/ba')
+          if [[ -n "$TAG_NOTES" ]]; then
+            echo "$TAG_NOTES" > release_notes.txt
+          elif [[ -f "RELEASE_NOTES.md" ]]; then
+            cp RELEASE_NOTES.md release_notes.txt
+          fi
+
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" "${release_files[@]}" --clobber
+            if [[ -s release_notes.txt ]]; then
+              gh release edit "$RELEASE_TAG" --notes-file release_notes.txt
+            fi
           else
             release_args=(
               "$RELEASE_TAG"
               "${release_files[@]}"
               --verify-tag
-              --generate-notes
               --title "Worklog $RELEASE_TAG"
             )
+            if [[ -s release_notes.txt ]]; then
+              release_args+=(--notes-file release_notes.txt)
+            else
+              release_args+=(--generate-notes)
+            fi
             if [[ "$RELEASE_TAG" == *-* ]]; then
               release_args+=(--prerelease)
             fi

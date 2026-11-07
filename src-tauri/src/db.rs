@@ -229,6 +229,24 @@ async fn ensure_legacy_columns(pool: &SqlitePool) -> AppResult<()> {
             .execute(pool)
             .await?;
     }
+
+    // Ensure auto-captured work logs have standard 8.0h default if hours is NULL
+    sqlx::query("UPDATE work_logs SET hours = 8.0 WHERE origin = 'auto' AND hours IS NULL")
+        .execute(pool)
+        .await?;
+
+    // Normalize auto-captured work logs where all evidence on that date belongs to a single project
+    sqlx::query(
+        "UPDATE work_logs SET project = (
+            SELECT project FROM activity_evidence WHERE activity_date = work_logs.work_date LIMIT 1
+        )
+        WHERE project = '多项目'
+          AND origin = 'auto'
+          AND (SELECT COUNT(DISTINCT project) FROM activity_evidence WHERE activity_date = work_logs.work_date) = 1",
+    )
+    .execute(pool)
+    .await?;
+
     Ok(())
 }
 

@@ -1647,13 +1647,26 @@ async fn write_auto_work_log(
             "Daily summary did not contain a task and progress",
         ));
     }
+
+    let primary_project: String = sqlx::query_scalar(
+        "SELECT project FROM activity_evidence WHERE activity_date=? GROUP BY project HAVING COUNT(*) = (SELECT COUNT(*) FROM activity_evidence WHERE activity_date=?)",
+    )
+    .bind(date.to_string())
+    .bind(date.to_string())
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| "多项目".to_string());
+
     if let Some(id) = existing_id {
         sqlx::query(
-            "UPDATE work_logs SET work_date=?, start_date=?, end_date=?, project='多项目', task=?, progress=?, result=?, blockers=?, hours=NULL, priority='medium', notes=?, origin='auto', auto_capture_date=?, manually_edited=0, git_commit_count=?, agent_session_count=?, pending_evidence_count=0, updated_at=? WHERE id=?",
+            "UPDATE work_logs SET work_date=?, start_date=?, end_date=?, project=?, task=?, progress=?, result=?, blockers=?, hours=COALESCE(hours, 8.0), priority='medium', notes=?, origin='auto', auto_capture_date=?, manually_edited=0, git_commit_count=?, agent_session_count=?, pending_evidence_count=0, updated_at=? WHERE id=?",
         )
         .bind(date.to_string())
         .bind(date.to_string())
         .bind(date.to_string())
+        .bind(&primary_project)
         .bind(task)
         .bind(summary.progress.trim())
         .bind(clean_text(summary.result.as_deref()))
@@ -1669,11 +1682,12 @@ async fn write_auto_work_log(
         return Ok(id);
     }
     Ok(sqlx::query(
-        "INSERT INTO work_logs(work_date, start_date, end_date, project, task, progress, result, blockers, hours, priority, notes, origin, auto_capture_date, manually_edited, git_commit_count, agent_session_count, pending_evidence_count, created_at, updated_at) VALUES(?, ?, ?, '多项目', ?, ?, ?, ?, NULL, 'medium', ?, 'auto', ?, 0, ?, ?, 0, ?, ?)",
+        "INSERT INTO work_logs(work_date, start_date, end_date, project, task, progress, result, blockers, hours, priority, notes, origin, auto_capture_date, manually_edited, git_commit_count, agent_session_count, pending_evidence_count, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 8.0, 'medium', ?, 'auto', ?, 0, ?, ?, 0, ?, ?)",
     )
     .bind(date.to_string())
     .bind(date.to_string())
     .bind(date.to_string())
+    .bind(&primary_project)
     .bind(task)
     .bind(summary.progress.trim())
     .bind(clean_text(summary.result.as_deref()))

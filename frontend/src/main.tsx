@@ -14,6 +14,7 @@ import {
   CircleAlert,
   ClipboardList,
   Clock,
+  Code2,
   Copy,
   Cpu,
   Database,
@@ -21,6 +22,7 @@ import {
   FileText,
   Flame,
   FolderPlus,
+  GitCommit,
   LoaderCircle,
   Mail,
   MessageSquare,
@@ -347,7 +349,7 @@ function SidebarWorkReportWidget(props: {
   const [report, setReport] = React.useState<WorkReportSummary | null>(null);
   const [hoveredIdx, setHoveredIdx] = React.useState<number | null>(null);
 
-  React.useEffect(() => {
+  const loadReport = React.useCallback(() => {
     let cancelled = false;
     api
       .getWorkReportSummary(props.todayStr)
@@ -358,7 +360,11 @@ function SidebarWorkReportWidget(props: {
     return () => {
       cancelled = true;
     };
-  }, [props.todayStr, props.refreshTrigger]);
+  }, [props.todayStr]);
+
+  React.useEffect(() => {
+    return loadReport();
+  }, [loadReport, props.refreshTrigger]);
 
   const stats = report?.daily_stats ?? [];
   const maxHours = Math.max(...stats.map((s) => s.total_hours), 4);
@@ -426,7 +432,14 @@ function SidebarWorkReportWidget(props: {
             <Activity size={11} />
           </div>
           <span className="report-card-title">工作情况分析</span>
-          <span className="report-period-badge">本周</span>
+          <span
+            className="report-period-badge"
+            onClick={loadReport}
+            title="点击刷新工作分析数据"
+            style={{ cursor: "pointer" }}
+          >
+            本周
+          </span>
         </div>
         <div className="report-tab-pills">
           <button
@@ -687,6 +700,115 @@ function SidebarWorkReportWidget(props: {
           </div>
         )}
       </div>
+
+      {/* Dev Activity & Commit Breakdown Box */}
+      <div className="report-dev-activity-box">
+        <div className="dev-activity-header">
+          <div className="dev-activity-title">
+            <Code2 size={11} className="dev-activity-icon" />
+            <span>研发活动</span>
+          </div>
+          <div className="dev-activity-pills">
+            <span
+              className="dev-pill agent-pill"
+              title={`本周与 AI Agent (Cursor / Codex) 会话 ${report?.agent_sessions ?? 0} 次`}
+            >
+              <Bot size={10} />
+              <span>Agent <strong>{report?.agent_sessions ?? 0}</strong> 次</span>
+            </span>
+            <span
+              className="dev-pill git-pill"
+              title={`本周代码提交共 ${report?.git_commits?.total ?? 0} 次`}
+            >
+              <GitCommit size={10} />
+              <span>Git <strong>{report?.git_commits?.total ?? 0}</strong> 次</span>
+            </span>
+          </div>
+        </div>
+
+        {(report?.git_commits?.total ?? 0) > 0 ? (
+          <>
+            <div
+              className="commit-segment-bar"
+              title={`Bug修复: ${report?.git_commits?.fixes ?? 0} · 功能新增: ${report?.git_commits?.features ?? 0} · 优化升级: ${report?.git_commits?.optimizations ?? 0} · 其他: ${report?.git_commits?.others ?? 0}`}
+            >
+              {(report?.git_commits?.fixes ?? 0) > 0 && (
+                <div
+                  className="commit-segment fix-segment"
+                  style={{
+                    width: `${((report!.git_commits!.fixes / report!.git_commits!.total) * 100).toFixed(1)}%`
+                  }}
+                  title={`Bug修复: ${report!.git_commits!.fixes} (${Math.round((report!.git_commits!.fixes / report!.git_commits!.total) * 100)}%)`}
+                />
+              )}
+              {(report?.git_commits?.features ?? 0) > 0 && (
+                <div
+                  className="commit-segment feat-segment"
+                  style={{
+                    width: `${((report!.git_commits!.features / report!.git_commits!.total) * 100).toFixed(1)}%`
+                  }}
+                  title={`功能新增: ${report!.git_commits!.features} (${Math.round((report!.git_commits!.features / report!.git_commits!.total) * 100)}%)`}
+                />
+              )}
+              {(report?.git_commits?.optimizations ?? 0) > 0 && (
+                <div
+                  className="commit-segment opt-segment"
+                  style={{
+                    width: `${((report!.git_commits!.optimizations / report!.git_commits!.total) * 100).toFixed(1)}%`
+                  }}
+                  title={`优化升级: ${report!.git_commits!.optimizations} (${Math.round((report!.git_commits!.optimizations / report!.git_commits!.total) * 100)}%)`}
+                />
+              )}
+              {(report?.git_commits?.others ?? 0) > 0 && (
+                <div
+                  className="commit-segment other-segment"
+                  style={{
+                    width: `${((report!.git_commits!.others / report!.git_commits!.total) * 100).toFixed(1)}%`
+                  }}
+                  title={`其他提交: ${report!.git_commits!.others} (${Math.round((report!.git_commits!.others / report!.git_commits!.total) * 100)}%)`}
+                />
+              )}
+            </div>
+
+            <div className="commit-types-grid">
+              <div className="commit-type-chip fix-chip" title="包括 fix, bug, hotfix, 修复等">
+                <span className="commit-chip-dot fix-dot" />
+                <span className="commit-chip-name">Bug修复</span>
+                <span className="commit-chip-val">
+                  {report?.git_commits?.fixes ?? 0}
+                  <small>({Math.round(((report?.git_commits?.fixes ?? 0) / (report?.git_commits?.total || 1)) * 100)}%)</small>
+                </span>
+              </div>
+              <div className="commit-type-chip feat-chip" title="包括 feat, feature, add, 新增等">
+                <span className="commit-chip-dot feat-dot" />
+                <span className="commit-chip-name">功能新增</span>
+                <span className="commit-chip-val">
+                  {report?.git_commits?.features ?? 0}
+                  <small>({Math.round(((report?.git_commits?.features ?? 0) / (report?.git_commits?.total || 1)) * 100)}%)</small>
+                </span>
+              </div>
+              <div className="commit-type-chip opt-chip" title="包括 refactor, perf, opt, 优化, 升级等">
+                <span className="commit-chip-dot opt-dot" />
+                <span className="commit-chip-name">优化升级</span>
+                <span className="commit-chip-val">
+                  {report?.git_commits?.optimizations ?? 0}
+                  <small>({Math.round(((report?.git_commits?.optimizations ?? 0) / (report?.git_commits?.total || 1)) * 100)}%)</small>
+                </span>
+              </div>
+              <div className="commit-type-chip other-chip" title="包括 docs, chore, style, build 等">
+                <span className="commit-chip-dot other-dot" />
+                <span className="commit-chip-name">其他提交</span>
+                <span className="commit-chip-val">
+                  {report?.git_commits?.others ?? 0}
+                  <small>({Math.round(((report?.git_commits?.others ?? 0) / (report?.git_commits?.total || 1)) * 100)}%)</small>
+                </span>
+              </div>
+            </div>
+          </>
+        ) : (
+          <div className="commit-empty-hint">本周暂无代码提交记录</div>
+        )}
+      </div>
     </div>
   );
 }
@@ -726,7 +848,10 @@ function DayDetailModal(props: {
 
   if (!targetDate) return null;
 
-  const totalHours = logs.reduce((acc, curr) => acc + (curr.hours ?? 0), 0);
+  const totalHours = logs.reduce(
+    (acc, curr) => acc + (curr.hours ?? (curr.origin === "auto" || (curr.git_commit_count ?? 0) > 0 ? 8 : 0)),
+    0
+  );
 
   const dateObj = new Date(targetDate + "T00:00:00");
   const weekdays = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
@@ -927,6 +1052,7 @@ function App() {
   const [notice, setNotice] = React.useState("");
   const [error, setError] = React.useState("");
   const [loading, setLoading] = React.useState(true);
+  const [refreshSeq, setRefreshSeq] = React.useState(0);
 
   const refresh = React.useCallback(async (pageOverride = workLogPage, pageSizeOverride = workLogPageSize) => {
     setLoading(true);
@@ -982,6 +1108,7 @@ function App() {
       setError(err instanceof Error ? err.message : "加载失败");
     } finally {
       setLoading(false);
+      setRefreshSeq((s) => s + 1);
     }
   }, [workLogPage, workLogPageSize]);
 
@@ -1018,7 +1145,10 @@ function App() {
     return workLogs.filter((item) => item.start_date === todayStr || item.work_date === todayStr);
   }, [workLogs, todayStr]);
   const todayHours = React.useMemo(() => {
-    return todayItems.reduce((acc, curr) => acc + (curr.hours ?? 0), 0);
+    return todayItems.reduce(
+      (acc, curr) => acc + (curr.hours ?? (curr.origin === "auto" || (curr.git_commit_count ?? 0) > 0 ? 8 : 0)),
+      0
+    );
   }, [todayItems]);
 
   return (
@@ -1031,7 +1161,7 @@ function App() {
           <div className="brand-text">
             <div className="brand-title-row">
               <strong>Worklog</strong>
-              <span className="brand-version-badge">v2.0.7</span>
+              <span className="brand-version-badge">v2.0.8</span>
             </div>
             <span>智能工作记录与报告</span>
           </div>
@@ -1077,12 +1207,12 @@ function App() {
           todayHours={todayHours}
           onOpenToday={() => setInspectedDate(todayStr)}
           onSelectDate={(d) => setInspectedDate(d)}
-          refreshTrigger={workLogMeta.total}
+          refreshTrigger={refreshSeq}
         />
 
         <SidebarWorkReportWidget
           todayStr={todayStr}
-          refreshTrigger={workLogMeta.total}
+          refreshTrigger={refreshSeq}
           onSelectDate={(d) => setInspectedDate(d)}
         />
 

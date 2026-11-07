@@ -268,6 +268,14 @@ export interface ProjectHourStat {
   count: number;
 }
 
+export interface GitCommitBreakdown {
+  total: number;
+  features: number;
+  fixes: number;
+  optimizations: number;
+  others: number;
+}
+
 export interface WorkReportSummary {
   week_total_hours: number;
   week_avg_hours: number;
@@ -275,4 +283,6 @@ export interface WorkReportSummary {
   total_tasks: number;
   daily_stats: DailyWorkStat[];
   top_projects: ProjectHourStat[];
+  git_commits?: GitCommitBreakdown;
+  agent_sessions?: number;
 }

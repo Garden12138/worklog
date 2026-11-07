@@ -102,6 +102,68 @@ pub async fn get_month_work_log_dates(
     Ok(dates)
 }
 
+fn classify_commit(summary: &str) -> &'static str {
+    let mut s = summary.trim();
+    while s.starts_with('[') {
+        if let Some(idx) = s.find(']') {
+            s = s[idx + 1..].trim();
+        } else {
+            break;
+        }
+    }
+    while s.starts_with('(') {
+        if let Some(idx) = s.find(')') {
+            s = s[idx + 1..].trim();
+        } else {
+            break;
+        }
+    }
+    let lower = s.to_lowercase();
+    if lower.starts_with("fix")
+        || lower.starts_with("bug")
+        || lower.starts_with("hotfix")
+        || lower.starts_with("patch")
+        || lower.starts_with("revert")
+        || lower.starts_with("修复")
+        || lower.starts_with("解决")
+        || lower.starts_with("缺陷")
+        || lower.contains("bugfix")
+    {
+        return "fix";
+    }
+
+    if lower.starts_with("feat")
+        || lower.starts_with("feature")
+        || lower.starts_with("add")
+        || lower.starts_with("new")
+        || lower.starts_with("新增")
+        || lower.starts_with("新功能")
+        || lower.starts_with("创建")
+    {
+        return "feature";
+    }
+
+    if lower.starts_with("refactor")
+        || lower.starts_with("perf")
+        || lower.starts_with("opt")
+        || lower.starts_with("upgrade")
+        || lower.starts_with("improve")
+        || lower.starts_with("update")
+        || lower.starts_with("style")
+        || lower.starts_with("clean")
+        || lower.starts_with("优化")
+        || lower.starts_with("重构")
+        || lower.starts_with("升级")
+        || lower.starts_with("改进")
+        || lower.starts_with("调整")
+        || lower.starts_with("完善")
+    {
+        return "optimize";
+    }
+
+    "other"
+}
+
 #[tauri::command]
 pub async fn get_work_report_summary(
     state: State<'_, AppState>,
@@ -160,8 +222,73 @@ pub async fn get_work_report_summary(
             })
             .collect();
 
-        let day_hours: f64 = day_logs.iter().map(|l| l.hours.unwrap_or(0.0)).sum();
         let day_tasks = day_logs.len() as i64;
+        let day_hours: f64 = if day_tasks == 0 {
+            0.0
+        } else {
+            let explicit_sum: f64 = day_logs
+                .iter()
+                .filter_map(|l| l.hours)
+                .filter(|h| *h > 0.0)
+                .sum();
+            let unassigned_count = day_logs
+                .iter()
+                .filter(|l| l.hours.map_or(true, |h| h <= 0.0))
+                .count();
+
+            let total_for_day = if unassigned_count == 0 {
+                explicit_sum
+            } else if explicit_sum > 0.0 {
+                explicit_sum + (unassigned_count as f64 * 2.0)
+            } else {
+                8.0
+            };
+
+            let unassigned_share = if unassigned_count > 0 {
+                (total_for_day - explicit_sum) / (unassigned_count as f64)
+            } else {
+                0.0
+            };
+
+            for log in &day_logs {
+                let log_h = if let Some(h) = log.hours {
+                    if h > 0.0 { h } else { unassigned_share }
+                } else {
+                    unassigned_share
+                };
+
+                if log.project == "多项目" || log.origin == "auto" {
+                    let evidence_projects: Vec<(String, i64)> = sqlx::query_as::<_, (String, i64)>(
+                        "SELECT project, COUNT(*) as cnt FROM activity_evidence WHERE activity_date = ? GROUP BY project",
+                    )
+                    .bind(&current_str)
+                    .fetch_all(&state.db.pool)
+                    .await
+                    .unwrap_or_default();
+
+                    if !evidence_projects.is_empty() {
+                        let total_cnt: i64 = evidence_projects.iter().map(|(_, c)| *c).sum();
+                        for (proj, cnt) in evidence_projects {
+                            let share = if total_cnt > 0 {
+                                (cnt as f64 / total_cnt as f64) * log_h
+                            } else {
+                                log_h
+                            };
+                            let entry = project_hours_map.entry(proj).or_insert((0.0, 0));
+                            entry.0 += share;
+                            entry.1 += cnt;
+                        }
+                        continue;
+                    }
+                }
+
+                let entry = project_hours_map.entry(log.project.clone()).or_insert((0.0, 0));
+                entry.0 += log_h;
+                entry.1 += 1;
+            }
+
+            total_for_day
+        };
 
         if day_hours > 0.0 || day_tasks > 0 {
             active_days += 1;
@@ -176,13 +303,6 @@ pub async fn get_work_report_summary(
             task_count: day_tasks,
             is_today,
         });
-    }
-
-    for log in &logs {
-        let h = log.hours.unwrap_or(0.0);
-        let entry = project_hours_map.entry(log.project.clone()).or_insert((0.0, 0));
-        entry.0 += h;
-        entry.1 += 1;
     }
 
     let mut top_projects: Vec<ProjectHourStat> = project_hours_map
@@ -210,6 +330,44 @@ pub async fn get_work_report_summary(
         0.0
     };
 
+    let log_agent_sessions: i64 = logs.iter().map(|l| l.agent_session_count).sum();
+    let evidence_agent_sessions: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM activity_evidence WHERE source_type IN ('cursor', 'codex') AND (activity_date BETWEEN ? AND ?)",
+    )
+    .bind(&monday_str)
+    .bind(&sunday_str)
+    .fetch_one(&state.db.pool)
+    .await
+    .unwrap_or(0);
+    let agent_sessions = evidence_agent_sessions.max(log_agent_sessions);
+
+    let commit_summaries: Vec<String> = sqlx::query_scalar(
+        "SELECT summary FROM activity_evidence WHERE source_type = 'git' AND (activity_date BETWEEN ? AND ?)",
+    )
+    .bind(&monday_str)
+    .bind(&sunday_str)
+    .fetch_all(&state.db.pool)
+    .await
+    .unwrap_or_default();
+
+    let log_git_commits: i64 = logs.iter().map(|l| l.git_commit_count).sum();
+
+    let mut git_commits = GitCommitBreakdown::default();
+    if !commit_summaries.is_empty() {
+        git_commits.total = commit_summaries.len() as i64;
+        for summary in &commit_summaries {
+            match classify_commit(summary) {
+                "fix" => git_commits.fixes += 1,
+                "feature" => git_commits.features += 1,
+                "optimize" => git_commits.optimizations += 1,
+                _ => git_commits.others += 1,
+            }
+        }
+    } else if log_git_commits > 0 {
+        git_commits.total = log_git_commits;
+        git_commits.others = log_git_commits;
+    }
+
     Ok(WorkReportSummary {
         week_total_hours: (week_total_hours * 10.0).round() / 10.0,
         week_avg_hours,
@@ -217,6 +375,8 @@ pub async fn get_work_report_summary(
         total_tasks,
         daily_stats,
         top_projects,
+        git_commits,
+        agent_sessions,
     })
 }
 

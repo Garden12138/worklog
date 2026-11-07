@@ -550,6 +550,15 @@ pub struct ProjectHourStat {
     pub count: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GitCommitBreakdown {
+    pub total: i64,
+    pub features: i64,
+    pub fixes: i64,
+    pub optimizations: i64,
+    pub others: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkReportSummary {
     pub week_total_hours: f64,
@@ -558,4 +567,6 @@ pub struct WorkReportSummary {
     pub total_tasks: i64,
     pub daily_stats: Vec<DailyWorkStat>,
     pub top_projects: Vec<ProjectHourStat>,
+    pub git_commits: GitCommitBreakdown,
+    pub agent_sessions: i64,
 }
