@@ -363,7 +363,20 @@ function SidebarWorkReportWidget(props: {
   }, [props.todayStr]);
 
   React.useEffect(() => {
-    return loadReport();
+    loadReport();
+    const timer = setInterval(() => {
+      loadReport();
+    }, 60000);
+
+    const onFocus = () => {
+      loadReport();
+    };
+    window.addEventListener("focus", onFocus);
+
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+    };
   }, [loadReport, props.refreshTrigger]);
 
   const stats = report?.daily_stats ?? [];
@@ -1140,7 +1153,26 @@ function App() {
     }
   }
 
-  const todayStr = today();
+  const [todayStr, setTodayStr] = React.useState(today());
+
+  React.useEffect(() => {
+    const timer = setInterval(() => {
+      const nowToday = today();
+      setTodayStr((prev) => (prev !== nowToday ? nowToday : prev));
+    }, 60000);
+
+    const onFocus = () => {
+      const nowToday = today();
+      setTodayStr((prev) => (prev !== nowToday ? nowToday : prev));
+      refresh().catch(() => {});
+    };
+    window.addEventListener("focus", onFocus);
+
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, []);
   const todayItems = React.useMemo(() => {
     return workLogs.filter((item) => item.start_date === todayStr || item.work_date === todayStr);
   }, [workLogs, todayStr]);
@@ -1161,7 +1193,7 @@ function App() {
           <div className="brand-text">
             <div className="brand-title-row">
               <strong>Worklog</strong>
-              <span className="brand-version-badge">v2.0.8</span>
+              <span className="brand-version-badge">v2.0.9</span>
             </div>
             <span>智能工作记录与报告</span>
           </div>
