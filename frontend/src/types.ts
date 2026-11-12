@@ -276,6 +276,13 @@ export interface GitCommitBreakdown {
   others: number;
 }
 
+export interface AgentSessionStat {
+  agent: string;
+  session_count: number;
+  duration_hours: number;
+  formatted_duration: string;
+}
+
 export interface WorkReportSummary {
   week_total_hours: number;
   week_avg_hours: number;
@@ -285,4 +292,6 @@ export interface WorkReportSummary {
   top_projects: ProjectHourStat[];
   git_commits?: GitCommitBreakdown;
   agent_sessions?: number;
+  agent_total_hours?: number;
+  agent_stats?: AgentSessionStat[];
 }

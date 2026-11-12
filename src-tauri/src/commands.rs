@@ -331,15 +331,10 @@ pub async fn get_work_report_summary(
     };
 
     let log_agent_sessions: i64 = logs.iter().map(|l| l.agent_session_count).sum();
-    let evidence_agent_sessions: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM activity_evidence WHERE source_type IN ('cursor', 'codex') AND (activity_date BETWEEN ? AND ?)",
-    )
-    .bind(&monday_str)
-    .bind(&sunday_str)
-    .fetch_one(&state.db.pool)
-    .await
-    .unwrap_or(0);
-    let agent_sessions = evidence_agent_sessions.max(log_agent_sessions);
+    let agent_stats = activity::compute_agent_breakdown(&state.db.pool, monday, sunday).await;
+    let agent_detected_sessions: i64 = agent_stats.iter().map(|s| s.session_count).sum();
+    let agent_total_hours = (agent_stats.iter().map(|s| s.duration_hours).sum::<f64>() * 10.0).round() / 10.0;
+    let agent_sessions = agent_detected_sessions.max(log_agent_sessions);
 
     let commit_summaries: Vec<String> = sqlx::query_scalar(
         "SELECT summary FROM activity_evidence WHERE source_type = 'git' AND (activity_date BETWEEN ? AND ?)",
@@ -377,6 +372,8 @@ pub async fn get_work_report_summary(
         top_projects,
         git_commits,
         agent_sessions,
+        agent_total_hours,
+        agent_stats,
     })
 }
 

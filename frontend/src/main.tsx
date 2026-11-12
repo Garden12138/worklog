@@ -490,6 +490,24 @@ function SidebarWorkReportWidget(props: {
           <span className="report-metric-num">{report?.total_tasks ?? 0} 项</span>
           <span className="report-metric-lbl">总任务数</span>
         </div>
+        <div className="report-metric-sep" />
+        <div
+          className="report-metric-col"
+          title={
+            report?.agent_stats && report.agent_stats.length > 0
+              ? report.agent_stats
+                  .map((s) => `${s.agent}: ${s.formatted_duration || s.duration_hours + "h"} (${s.session_count}次)`)
+                  .join(" · ")
+              : "暂无 Agent 对话记录"
+          }
+        >
+          <span className="report-metric-num" style={{ color: "#7c3aed" }}>
+            {report?.agent_total_hours !== undefined && report.agent_total_hours > 0
+              ? `${report.agent_total_hours.toFixed(1)}h`
+              : "0h"}
+          </span>
+          <span className="report-metric-lbl">AI对话</span>
+        </div>
       </div>
 
       <div className="report-tab-body">
@@ -719,15 +737,15 @@ function SidebarWorkReportWidget(props: {
         <div className="dev-activity-header">
           <div className="dev-activity-title">
             <Code2 size={11} className="dev-activity-icon" />
-            <span>研发活动</span>
+            <span>研发活动与 AI 对话</span>
           </div>
           <div className="dev-activity-pills">
             <span
               className="dev-pill agent-pill"
-              title={`本周与 AI Agent (Cursor / Codex) 会话 ${report?.agent_sessions ?? 0} 次`}
+              title={`本周与 AI Agent 会话共 ${report?.agent_sessions ?? 0} 次，累计 ${report?.agent_total_hours?.toFixed(1) ?? "0"}h`}
             >
               <Bot size={10} />
-              <span>Agent <strong>{report?.agent_sessions ?? 0}</strong> 次</span>
+              <span>AI <strong>{report?.agent_total_hours?.toFixed(1) ?? "0"}h</strong></span>
             </span>
             <span
               className="dev-pill git-pill"
@@ -738,6 +756,34 @@ function SidebarWorkReportWidget(props: {
             </span>
           </div>
         </div>
+
+        {/* Agent 对话时长分项统计（每个 Agent 分开） */}
+        {report?.agent_stats && report.agent_stats.length > 0 && (
+          <div className="agent-breakdown-section">
+            <div className="agent-breakdown-subhead">
+              <span className="agent-subhead-title">Agent 对话时长明细</span>
+              <span className="agent-subhead-total">共 {report?.agent_total_hours?.toFixed(1) ?? "0"}h · {report?.agent_sessions ?? 0} 次</span>
+            </div>
+            <div className="agent-chips-row">
+              {report.agent_stats.map((s) => (
+                <div
+                  key={s.agent}
+                  className="agent-stat-chip"
+                  title={`${s.agent}：本周累计对话 ${s.formatted_duration || s.duration_hours + 'h'}，共 ${s.session_count} 次会话`}
+                >
+                  <div className="agent-chip-left">
+                    <span className={`agent-dot ${s.agent.toLowerCase()}-dot`} />
+                    <span className="agent-chip-name">{s.agent}</span>
+                  </div>
+                  <div className="agent-chip-right">
+                    <span className="agent-chip-hours">{s.formatted_duration || `${s.duration_hours}h`}</span>
+                    <span className="agent-chip-sessions">({s.session_count}次)</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {(report?.git_commits?.total ?? 0) > 0 ? (
           <>
@@ -1193,7 +1239,7 @@ function App() {
           <div className="brand-text">
             <div className="brand-title-row">
               <strong>Worklog</strong>
-              <span className="brand-version-badge">v2.0.9</span>
+              <span className="brand-version-badge">v2.0.8</span>
             </div>
             <span>智能工作记录与报告</span>
           </div>

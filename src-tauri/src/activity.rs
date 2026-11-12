@@ -1921,6 +1921,294 @@ fn truncate_utf8_bytes(value: &str, limit: usize) -> String {
     result
 }
 
+pub async fn compute_agent_breakdown(
+    pool: &SqlitePool,
+    monday: NaiveDate,
+    sunday: NaiveDate,
+) -> Vec<crate::models::AgentSessionStat> {
+    let mut stats = Vec::new();
+    let (start_utc, _) = match day_bounds(monday) {
+        Ok(b) => b,
+        Err(_) => return stats,
+    };
+    let (_, end_utc) = match day_bounds(sunday) {
+        Ok(b) => b,
+        Err(_) => return stats,
+    };
+
+    let monday_str = monday.format("%Y-%m-%d").to_string();
+    let sunday_str = sunday.format("%Y-%m-%d").to_string();
+
+    let sources: Vec<(i64, String, String, String)> = sqlx::query_as(
+        "SELECT id, source_type, display_name, path FROM activity_sources WHERE source_type IN ('cursor', 'codex') AND enabled=1",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let mut cursor_path: Option<PathBuf> = None;
+    let mut codex_path: Option<PathBuf> = None;
+    for (_, st, _, p) in &sources {
+        if st == "cursor" && cursor_path.is_none() {
+            cursor_path = Some(PathBuf::from(p));
+        } else if st == "codex" && codex_path.is_none() {
+            codex_path = Some(PathBuf::from(p));
+        }
+    }
+
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    if cursor_path.is_none() {
+        let default_cursor = if cfg!(target_os = "macos") {
+            home.join("Library/Application Support/Cursor/User")
+        } else if cfg!(target_os = "windows") {
+            std::env::var_os("APPDATA")
+                .map(PathBuf::from)
+                .map(|p| p.join("Cursor/User"))
+                .unwrap_or_else(|| home.join(".config/Cursor/User"))
+        } else {
+            home.join(".config/Cursor/User")
+        };
+        if default_cursor.is_dir() {
+            cursor_path = Some(default_cursor);
+        }
+    }
+    if codex_path.is_none() {
+        let default_codex = home.join(".codex");
+        if default_codex.join("sessions").is_dir() {
+            codex_path = Some(default_codex);
+        }
+    }
+
+    // 1. Cursor
+    if let Some(cp) = cursor_path {
+        let evidence_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM activity_evidence WHERE source_type='cursor' AND (activity_date BETWEEN ? AND ?)",
+        )
+        .bind(&monday_str)
+        .bind(&sunday_str)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+
+        let (duration_sec, detected_sessions) = compute_cursor_duration(&cp, start_utc, end_utc).await;
+        let final_count = evidence_count.max(detected_sessions as i64);
+        let final_hours = if duration_sec > 0 {
+            (duration_sec as f64 / 3600.0 * 10.0).round() / 10.0
+        } else if final_count > 0 {
+            ((final_count as f64 * 0.3) * 10.0).round() / 10.0
+        } else {
+            0.0
+        };
+
+        let formatted = format_hours_and_mins(final_hours, duration_sec);
+        stats.push(crate::models::AgentSessionStat {
+            agent: "Cursor".to_string(),
+            session_count: final_count,
+            duration_hours: final_hours,
+            formatted_duration: formatted,
+        });
+    }
+
+    // 2. Codex
+    if let Some(cp) = codex_path {
+        let evidence_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM activity_evidence WHERE source_type='codex' AND (activity_date BETWEEN ? AND ?)",
+        )
+        .bind(&monday_str)
+        .bind(&sunday_str)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+
+        let (duration_sec, detected_sessions) = compute_codex_duration(&cp, monday, sunday).await;
+        let final_count = evidence_count.max(detected_sessions as i64);
+        let final_hours = if duration_sec > 0 {
+            (duration_sec as f64 / 3600.0 * 10.0).round() / 10.0
+        } else if final_count > 0 {
+            ((final_count as f64 * 0.3) * 10.0).round() / 10.0
+        } else {
+            0.0
+        };
+
+        let formatted = format_hours_and_mins(final_hours, duration_sec);
+        stats.push(crate::models::AgentSessionStat {
+            agent: "Codex".to_string(),
+            session_count: final_count,
+            duration_hours: final_hours,
+            formatted_duration: formatted,
+        });
+    }
+
+    stats
+}
+
+async fn compute_cursor_duration(
+    cursor_dir: &Path,
+    start_utc: DateTime<Utc>,
+    end_utc: DateTime<Utc>,
+) -> (i64, usize) {
+    let db_path = cursor_dir.join("globalStorage/state.vscdb");
+    if !db_path.is_file() {
+        return (0, 0);
+    }
+
+    let options = SqliteConnectOptions::new()
+        .filename(&db_path)
+        .read_only(true)
+        .busy_timeout(std::time::Duration::from_secs(3));
+
+    let mut conn = match SqliteConnection::connect_with(&options).await {
+        Ok(c) => c,
+        Err(_) => return (0, 0),
+    };
+
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT value FROM cursorDiskKV WHERE key >= 'bubbleId:' AND key < 'bubbleId;' AND key NOT LIKE '%/s:%' AND key NOT LIKE '%/t:%'",
+    )
+    .fetch_all(&mut conn)
+    .await
+    .unwrap_or_default();
+
+    let mut timestamps: Vec<DateTime<Utc>> = Vec::new();
+    for (v,) in rows {
+        if let Ok(val) = serde_json::from_str::<Value>(&v) {
+            if let Some(c) = val.get("createdAt").and_then(Value::as_str) {
+                if let Ok(dt) = DateTime::parse_from_rfc3339(c) {
+                    let utc = dt.with_timezone(&Utc);
+                    if utc >= start_utc && utc <= end_utc {
+                        timestamps.push(utc);
+                    }
+                }
+            }
+        }
+    }
+
+    if timestamps.is_empty() {
+        return (0, 0);
+    }
+
+    timestamps.sort();
+    let mut total_sec: i64 = 0;
+    let mut cur_start = timestamps[0];
+    let mut cur_end = timestamps[0];
+    let mut sessions = 1;
+
+    for t in timestamps.iter().skip(1) {
+        let gap = (*t - cur_end).num_seconds();
+        if gap <= 15 * 60 {
+            cur_end = *t;
+        } else {
+            let session_dur = (cur_end - cur_start).num_seconds().max(60) + 120;
+            total_sec += session_dur;
+            sessions += 1;
+            cur_start = *t;
+            cur_end = *t;
+        }
+    }
+    total_sec += (cur_end - cur_start).num_seconds().max(60) + 120;
+
+    (total_sec, sessions)
+}
+
+async fn compute_codex_duration(
+    codex_dir: &Path,
+    monday: NaiveDate,
+    sunday: NaiveDate,
+) -> (i64, usize) {
+    let sessions_dir = if codex_dir.join("sessions").is_dir() {
+        codex_dir.join("sessions")
+    } else {
+        codex_dir.to_path_buf()
+    };
+    if !sessions_dir.is_dir() {
+        return (0, 0);
+    }
+
+    let (start_utc, _) = match day_bounds(monday) {
+        Ok(b) => b,
+        Err(_) => return (0, 0),
+    };
+    let (_, end_utc) = match day_bounds(sunday) {
+        Ok(b) => b,
+        Err(_) => return (0, 0),
+    };
+
+    let mut timestamps: Vec<DateTime<Utc>> = Vec::new();
+    let mut files = Vec::new();
+    let _ = collect_files(&sessions_dir, "jsonl", &mut files);
+
+    for file in files {
+        if let Ok(metadata) = fs::metadata(&file) {
+            if let Ok(modified) = metadata.modified() {
+                let m_utc = DateTime::<Utc>::from(modified);
+                if m_utc < start_utc - Duration::days(1) {
+                    continue;
+                }
+            }
+        }
+        let Ok(f) = fs::File::open(&file) else { continue };
+        let reader = BufReader::new(f);
+        for line in reader.lines() {
+            let Ok(l) = line else { continue };
+            if let Ok(v) = serde_json::from_str::<Value>(&l) {
+                if let Some(ts) = record_timestamp(&v) {
+                    if ts >= start_utc && ts <= end_utc {
+                        timestamps.push(ts);
+                    }
+                }
+            }
+        }
+    }
+
+    if timestamps.is_empty() {
+        return (0, 0);
+    }
+
+    timestamps.sort();
+    let mut total_sec: i64 = 0;
+    let mut cur_start = timestamps[0];
+    let mut cur_end = timestamps[0];
+    let mut sessions = 1;
+
+    for t in timestamps.iter().skip(1) {
+        let gap = (*t - cur_end).num_seconds();
+        if gap <= 15 * 60 {
+            cur_end = *t;
+        } else {
+            let session_dur = (cur_end - cur_start).num_seconds().max(60) + 120;
+            total_sec += session_dur;
+            sessions += 1;
+            cur_start = *t;
+            cur_end = *t;
+        }
+    }
+    total_sec += (cur_end - cur_start).num_seconds().max(60) + 120;
+
+    (total_sec, sessions)
+}
+
+fn format_hours_and_mins(hours: f64, seconds: i64) -> String {
+    if seconds >= 3600 {
+        let h = seconds / 3600;
+        let m = (seconds % 3600) / 60;
+        if m > 0 {
+            format!("{h}小时{m}分")
+        } else {
+            format!("{h}小时")
+        }
+    } else if seconds >= 60 {
+        let m = seconds / 60;
+        format!("{m}分钟")
+    } else if hours > 0.0 {
+        format!("{hours:.1}h")
+    } else {
+        "0h".to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

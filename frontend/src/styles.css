@@ -987,6 +987,103 @@ textarea:focus-visible {
   border: 1px solid #dcfce7;
 }
 
+/* Agent Duration Breakdown Sub-Section */
+.agent-breakdown-section {
+  display: flex;
+  flex-direction: column;
+  gap: 3.5px;
+  background: #ffffff;
+  border: 1px solid #eef2f6;
+  border-radius: 5px;
+  padding: 4px 6px;
+}
+
+.agent-breakdown-subhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 8.5px;
+  color: #64748b;
+}
+
+.agent-subhead-title {
+  font-weight: 650;
+  color: #475569;
+}
+
+.agent-subhead-total {
+  font-weight: 700;
+  color: #7c3aed;
+}
+
+.agent-chips-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.agent-stat-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #fdfcff;
+  border: 1px solid #f3e8ff;
+  border-radius: 4px;
+  padding: 2.5px 5px;
+  font-size: 9px;
+  transition: all 0.15s ease;
+}
+
+.agent-stat-chip:hover {
+  background: #faf5ff;
+  border-color: #d8b4fe;
+}
+
+.agent-chip-left {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.agent-dot {
+  width: 5.5px;
+  height: 5.5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.cursor-dot {
+  background: #0284c7;
+  box-shadow: 0 0 3px rgba(2, 132, 199, 0.4);
+}
+
+.codex-dot {
+  background: #10b981;
+  box-shadow: 0 0 3px rgba(16, 185, 129, 0.4);
+}
+
+.agent-chip-name {
+  font-weight: 650;
+  color: #334155;
+}
+
+.agent-chip-right {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.agent-chip-hours {
+  font-weight: 750;
+  color: #7c3aed;
+}
+
+.agent-chip-sessions {
+  font-size: 8.5px;
+  color: #94a3b8;
+  font-weight: 500;
+}
+
 /* Multi-colored commit ratio bar */
 .commit-segment-bar {
   width: 100%;

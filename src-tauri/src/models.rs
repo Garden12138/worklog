@@ -559,6 +559,14 @@ pub struct GitCommitBreakdown {
     pub others: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentSessionStat {
+    pub agent: String,
+    pub session_count: i64,
+    pub duration_hours: f64,
+    pub formatted_duration: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkReportSummary {
     pub week_total_hours: f64,
@@ -569,4 +577,6 @@ pub struct WorkReportSummary {
     pub top_projects: Vec<ProjectHourStat>,
     pub git_commits: GitCommitBreakdown,
     pub agent_sessions: i64,
+    pub agent_total_hours: f64,
+    pub agent_stats: Vec<AgentSessionStat>,
 }
