@@ -81,6 +81,7 @@ export const api = {
   deleteTemplate: (id: number) => call<void>("delete_template", { id }),
 
   listReports: () => call<Report[]>("list_reports"),
+  listActiveGenerations: () => call<string[]>("list_active_generations"),
   updateReport: (id: number, payload: Partial<Report>) =>
     call<Report>("update_report", { id, payload }),
   optimizeReport: (id: number, payload: { content: string; optimization_request: string }) =>

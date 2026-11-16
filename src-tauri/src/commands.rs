@@ -896,6 +896,14 @@ pub async fn generate_report(
 }
 
 #[tauri::command]
+pub async fn list_active_generations(
+    state: State<'_, AppState>,
+) -> AppResult<Vec<String>> {
+    let active = state.active_generations.lock().await;
+    Ok(active.iter().cloned().collect())
+}
+
+#[tauri::command]
 pub async fn export_report_docx(
     state: State<'_, AppState>,
     report_id: i64,

@@ -1171,6 +1171,86 @@ function App() {
     }
   }, [workLogPage, workLogPageSize]);
 
+  const [activeAiTask, setActiveAiTask] = React.useState<{
+    type: "generate_report" | "optimize_report" | "optimize_template" | "import_template_example" | "daily_capture" | "chat_modify_log";
+    title: string;
+    tab: Tab;
+  } | null>(null);
+  const isGeneratingReport = activeAiTask?.type === "generate_report";
+  const [generatingReportTitle, setGeneratingReportTitle] = React.useState<string | null>(null);
+  const [selectedReportId, setSelectedReportId] = React.useState<number | null>(null);
+
+  React.useEffect(() => {
+    api.listActiveGenerations()
+      .then((actives) => {
+        if (actives && actives.length > 0) {
+          setActiveAiTask({
+            type: "generate_report",
+            title: "报告后台生成中",
+            tab: "reports"
+          });
+          setGeneratingReportTitle("报告生成中");
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  React.useEffect(() => {
+    if (activeAiTask?.type !== "generate_report") return;
+    const interval = setInterval(async () => {
+      try {
+        const actives = await api.listActiveGenerations();
+        if (!actives || actives.length === 0) {
+          setActiveAiTask(null);
+          setGeneratingReportTitle(null);
+          await refresh();
+        }
+      } catch {
+        // ignore
+      }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [activeAiTask?.type, refresh]);
+
+  async function handleGenerateReport(payload: {
+    report_type: ReportType;
+    anchor_date?: string;
+    period_start?: string;
+    period_end?: string;
+    template_id?: number;
+    overwrite?: boolean;
+  }): Promise<Report | void> {
+    if (activeAiTask) {
+      setNotice(`已有 AI 任务「${activeAiTask.title}」正在后台运行中，请稍候`);
+      return;
+    }
+    const typeLabel = reportLabels[payload.report_type] || "报告";
+    const titlePreview = `${payload.anchor_date ? payload.anchor_date + " " : ""}${typeLabel}`;
+    setActiveAiTask({
+      type: "generate_report",
+      title: `生成${titlePreview}草稿`,
+      tab: "reports"
+    });
+    setGeneratingReportTitle(titlePreview);
+    setError("");
+    setNotice(`正在后台生成${typeLabel}草稿，您可以切换菜单继续其他操作...`);
+
+    try {
+      const res = await api.generateReport(payload);
+      setActiveAiTask(null);
+      setGeneratingReportTitle(null);
+      setSelectedReportId(res.report.id);
+      setNotice(`报告草稿「${res.report.title}」已在后台生成完成并已自动选中`);
+      await refresh();
+      return res.report;
+    } catch (err) {
+      setActiveAiTask(null);
+      setGeneratingReportTitle(null);
+      setError(err instanceof Error ? err.message : "生成报告草稿失败");
+      throw err;
+    }
+  }
+
   React.useEffect(() => {
     void refresh();
   }, [refresh]);
@@ -1183,16 +1263,17 @@ function App() {
     return () => clearTimeout(timer);
   }, [notice]);
 
-  async function run(action: () => Promise<void>, success: string, options?: { workLogPage?: number }) {
+  async function run<T = void>(action: () => Promise<T>, success: string, options?: { workLogPage?: number }): Promise<T> {
     setError("");
     setNotice("");
     try {
-      await action();
+      const result = await action();
       setNotice(success);
       if (options?.workLogPage) {
         setWorkLogPage(options.workLogPage);
       }
       await refresh(options?.workLogPage);
+      return result;
     } catch (err) {
       setError(err instanceof Error ? err.message : "操作失败");
       throw err;
@@ -1239,7 +1320,7 @@ function App() {
           <div className="brand-text">
             <div className="brand-title-row">
               <strong>Worklog</strong>
-              <span className="brand-version-badge">v2.0.8</span>
+              <span className="brand-version-badge">v2.0.9</span>
             </div>
             <span>智能工作记录与报告</span>
           </div>
@@ -1250,7 +1331,13 @@ function App() {
             active={tab === "logs"}
             icon={<CalendarDays size={17} />}
             onClick={() => setTab("logs")}
-            badge={workLogMeta.total > 0 ? `${workLogMeta.total}` : undefined}
+            badge={
+              activeAiTask?.tab === "logs" ? (
+                <LoaderCircle className="spin" size={13} />
+              ) : workLogMeta.total > 0 ? (
+                `${workLogMeta.total}`
+              ) : undefined
+            }
           >
             每日记录
           </TabButton>
@@ -1258,7 +1345,13 @@ function App() {
             active={tab === "reports"}
             icon={<FileText size={17} />}
             onClick={() => setTab("reports")}
-            badge={reports.length > 0 ? `${reports.length}` : undefined}
+            badge={
+              activeAiTask?.tab === "reports" ? (
+                <LoaderCircle className="spin" size={13} />
+              ) : reports.length > 0 ? (
+                `${reports.length}`
+              ) : undefined
+            }
           >
             报告草稿
           </TabButton>
@@ -1266,7 +1359,13 @@ function App() {
             active={tab === "templates"}
             icon={<NotebookTabs size={17} />}
             onClick={() => setTab("templates")}
-            badge={templates.length > 0 ? `${templates.length}` : undefined}
+            badge={
+              activeAiTask?.tab === "templates" ? (
+                <LoaderCircle className="spin" size={13} />
+              ) : templates.length > 0 ? (
+                `${templates.length}`
+              ) : undefined
+            }
           >
             模板管理
           </TabButton>
@@ -1274,6 +1373,11 @@ function App() {
             active={tab === "settings"}
             icon={<Settings size={17} />}
             onClick={() => setTab("settings")}
+            badge={
+              activeAiTask?.tab === "settings" ? (
+                <LoaderCircle className="spin" size={13} />
+              ) : undefined
+            }
           >
             系统设置
           </TabButton>
@@ -1310,16 +1414,20 @@ function App() {
         </div>
       </aside>
 
-      <section className="workspace" aria-busy={loading}>
+      <section className="workspace" aria-busy={loading || Boolean(activeAiTask)}>
         <header className="topbar">
           <div>
             <p className="eyebrow status-line" aria-live="polite">
-              {loading ? <LoaderCircle className="spin" size={14} /> : <CheckCircle2 size={14} />}
-              {loading ? "正在同步本地数据" : "本地工作空间"}
+              {loading || Boolean(activeAiTask) ? <LoaderCircle className="spin" size={14} /> : <CheckCircle2 size={14} />}
+              {activeAiTask
+                ? `正在后台运行【${activeAiTask.title}】`
+                : loading
+                ? "正在同步本地数据"
+                : "本地工作空间"}
             </p>
             <h1>{tabTitle(tab)}</h1>
           </div>
-          <button className="icon-button" type="button" title="刷新数据" aria-label="刷新数据" disabled={loading} onClick={() => void refresh()}>
+          <button className="icon-button" type="button" title="刷新数据" aria-label="刷新数据" disabled={loading || Boolean(activeAiTask)} onClick={() => void refresh()}>
             <RefreshCw size={18} />
           </button>
         </header>
@@ -1329,164 +1437,219 @@ function App() {
 
         <div className="page-content-wrapper">
 
-        {tab === "logs" && (
-          <WorkLogsPage
-            items={workLogs}
-            meta={workLogMeta}
-            pageSize={workLogPageSize}
-            onCreate={(payload) => run(() => api.createWorkLog(payload).then(() => undefined), "工作记录已保存", { workLogPage: 1 })}
-            onUpdate={(id, payload) => run(() => api.updateWorkLog(id, payload).then(() => undefined), "工作记录已更新")}
-            onDelete={(id) => run(() => api.deleteWorkLog(id), "工作记录已删除")}
-            onPageChange={setWorkLogPage}
-            onPageSizeChange={(nextPageSize) => {
-              setWorkLogPageSize(nextPageSize);
-              setWorkLogPage(1);
-            }}
-            onOpenSettings={() => setTab("settings")}
-            targetEditLog={targetEditLog}
-            onClearTargetEditLog={() => setTargetEditLog(null)}
-            targetCreateDate={targetCreateDate}
-            onClearTargetCreateDate={() => setTargetCreateDate(null)}
-          />
-        )}
-        {tab === "reports" && (
-          <ReportsPage
-            reports={reports}
-            templates={templates}
-            recipients={recipients}
-            onGenerate={(payload) => run(() => api.generateReport(payload).then(() => undefined), "报告草稿已生成")}
-            onOptimize={async (id, payload) => {
-              setError("");
-              setNotice("");
-              try {
-                const result = await api.optimizeReport(id, payload);
-                return result.content;
-              } catch (err) {
-                setError(err instanceof Error ? err.message : "优化报告草稿失败");
-                throw err;
-              }
-            }}
-            onSave={(id, payload) => run(() => api.updateReport(id, payload).then(() => undefined), "报告草稿已保存到本地数据库")}
-            onDelete={(id) => run(() => api.deleteReport(id), "报告草稿已删除")}
-            onExport={async (id) => {
-              setError("");
-              const exported = await api.exportReportDocx(id);
-              if (exported) {
-                setNotice(`DOCX 已保存到 ${exported}`);
-              }
-            }}
-            onSendEmail={(id, payload) => run(() => api.sendReportEmail(id, payload).then(() => undefined), "报告邮件已发送")}
-            onListEmailDeliveries={(id) => api.listReportEmailDeliveries(id)}
-            onNotice={(message) => setNotice(message)}
-          />
-        )}
-        {tab === "templates" && (
-          <TemplatesPage
-            templates={templates}
-            onCreate={(payload) => run(() => api.createTemplate(payload).then(() => undefined), "模板已创建")}
-            onImportExample={async (payload) => {
-              setError("");
-              setNotice("");
-              try {
-                const result = await api.importTemplateExample(payload);
-                setNotice("已根据示例生成模板草稿，请检查并保存模板");
-                return result.content;
-              } catch (err) {
-                setError(err instanceof Error ? err.message : "导入示例失败");
-                throw err;
-              }
-            }}
-            onOptimize={async (payload) => {
-              setError("");
-              setNotice("");
-              try {
-                const result = await api.optimizeTemplate(payload);
-                return result.content;
-              } catch (err) {
-                setError(err instanceof Error ? err.message : "优化模板失败");
-                throw err;
-              }
-            }}
-            onSave={(id, payload) => run(() => api.updateTemplate(id, payload).then(() => undefined), "模板已保存")}
-            onDelete={(id) => run(() => api.deleteTemplate(id), "模板已删除")}
-          />
-        )}
-        {tab === "settings" && (
-          <SettingsPage
-            setting={llmSetting}
-            settings={llmSettings}
-            templates={templates}
-            emailSetting={emailSetting}
-            recipients={recipients}
-            reportSchedules={reportSchedules}
-            desktopPreferences={desktopPreferences}
-            migrationResult={migrationResult}
-            activitySources={activitySources}
-            activityCandidates={activityCandidates}
-            dailyCaptureSettings={dailyCaptureSettings}
-            dailyCaptureRuns={dailyCaptureRuns}
-            onSave={(payload) => run(
-              () => (payload.id
-                ? api.updateLlmSetting(payload.id, payload)
-                : api.createLlmSetting(payload)
-              ).then(() => undefined),
-              payload.id ? "LLM 设置已更新并应用" : "LLM 新设置已保存并应用"
-            )}
-            onApplyLlmSetting={(id) => run(() => api.applyLlmSetting(id).then(() => undefined), "LLM 配置已应用")}
-            onDeleteLlmSetting={(id) => run(() => api.deleteLlmSetting(id), "LLM 配置已删除")}
-            onSaveReportSchedule={(reportType, payload) => run(
-              () => api.updateReportSchedule(reportType, payload).then(() => undefined),
-              `${reportLabels[reportType]}定时设置已保存，当前${payload.enabled ? "已启用" : "已停用"}`
-            )}
-            onSaveEmail={(payload) => run(() => api.updateEmailSetting(payload).then(() => undefined), "SMTP 邮箱设置已保存")}
-            onTestEmail={(address) => run(() => api.testEmailSetting(address).then(() => undefined), "测试邮件已发送")}
-            onCreateRecipient={(payload) => run(() => api.createRecipient(payload).then(() => undefined), "收件人已添加")}
-            onUpdateRecipient={(id, payload) => run(() => api.updateRecipient(id, payload).then(() => undefined), "收件人已更新")}
-            onDeleteRecipient={(id) => run(() => api.deleteRecipient(id), "收件人已删除")}
-            onCreateActivitySource={(payload) => run(
-              () => api.createActivitySource(payload).then(() => undefined),
-              "采集目录已添加"
-            )}
-            onUpdateActivitySource={(id, payload) => run(
-              () => api.updateActivitySource(id, payload).then(() => undefined),
-              "采集目录已更新"
-            )}
-            onDeleteActivitySource={(id) => run(
-              () => api.deleteActivitySource(id),
-              "采集目录已删除"
-            )}
-            onSaveDailyCaptureSettings={(payload) => run(
-              () => api.updateDailyCaptureSettings(payload).then(() => undefined),
-              payload.enabled ? "每日自动记录已启用" : "每日自动记录设置已保存"
-            )}
-            onRunDailyCapture={async (date, forceOverwrite) => {
-              setError("");
-              setNotice("");
-              try {
-                const result = await api.runDailyCapture(date, forceOverwrite);
-                setNotice(result.status === "skipped" ? "当天没有发现完成事项" : "每日工作记录扫描完成");
-                await refresh();
-                return result;
-              } catch (err) {
-                setError(err instanceof Error ? err.message : "自动记录扫描失败");
-                throw err;
-              }
-            }}
-            onSetLaunchAtLogin={async (enabled) => {
-              const next = await api.setLaunchAtLogin(enabled);
-              setDesktopPreferences(next);
-              setNotice(enabled ? "已启用开机启动" : "已关闭开机启动");
-            }}
-            onImportLegacy={async () => {
-              const result = await api.importLegacyDatabase();
-              if (result) {
-                setMigrationResult(result);
-                setNotice("旧版数据库导入完成");
-                await refresh();
-              }
-            }}
-          />
-        )}
+          <div className={`tab-page-pane ${tab === "logs" ? "active" : "is-hidden"}`}>
+            <WorkLogsPage
+              items={workLogs}
+              meta={workLogMeta}
+              pageSize={workLogPageSize}
+              onCreate={(payload) => run(() => api.createWorkLog(payload).then(() => undefined), "工作记录已保存", { workLogPage: 1 })}
+              onUpdate={(id, payload) => run(() => api.updateWorkLog(id, payload).then(() => undefined), "工作记录已更新")}
+              onDelete={(id) => run(() => api.deleteWorkLog(id), "工作记录已删除")}
+              onPageChange={setWorkLogPage}
+              onPageSizeChange={(nextPageSize) => {
+                setWorkLogPageSize(nextPageSize);
+                setWorkLogPage(1);
+              }}
+              onOpenSettings={() => setTab("settings")}
+              targetEditLog={targetEditLog}
+              onClearTargetEditLog={() => setTargetEditLog(null)}
+              targetCreateDate={targetCreateDate}
+              onClearTargetCreateDate={() => setTargetCreateDate(null)}
+              onAiChatActiveChange={(active) => {
+                if (active) {
+                  setActiveAiTask({ type: "chat_modify_log", title: "AI 对话分析修改工作记录", tab: "logs" });
+                } else if (activeAiTask?.type === "chat_modify_log") {
+                  setActiveAiTask(null);
+                }
+              }}
+            />
+          </div>
+
+          <div className={`tab-page-pane ${tab === "reports" ? "active" : "is-hidden"}`}>
+            <ReportsPage
+              reports={reports}
+              templates={templates}
+              recipients={recipients}
+              selectedId={selectedReportId}
+              onSelectId={setSelectedReportId}
+              isGenerating={isGeneratingReport}
+              generatingTitle={generatingReportTitle}
+              onGenerate={handleGenerateReport}
+              onOptimize={async (id, payload) => {
+                if (activeAiTask) {
+                  setNotice(`当前已有 AI 任务「${activeAiTask.title}」在后台运行中，请稍候`);
+                  throw new Error("当前已有 AI 任务在运行中");
+                }
+                setError("");
+                setNotice("");
+                const currentReport = reports.find((r) => r.id === id);
+                const title = currentReport?.title || "报告草稿";
+                setActiveAiTask({ type: "optimize_report", title: `优化报告「${title}」`, tab: "reports" });
+                setNotice(`正在后台调用 AI 优化报告草稿，您可以切换菜单继续其他操作...`);
+                try {
+                  const result = await api.optimizeReport(id, payload);
+                  setActiveAiTask(null);
+                  setNotice(`报告草稿已由 AI 优化完成，请在对比弹窗中确认`);
+                  return result.content;
+                } catch (err) {
+                  setActiveAiTask(null);
+                  setError(err instanceof Error ? err.message : "优化报告草稿失败");
+                  throw err;
+                }
+              }}
+              onSave={(id, payload) => run(() => api.updateReport(id, payload).then(() => undefined), "报告草稿已保存到本地数据库")}
+              onDelete={(id) => {
+                if (selectedReportId === id) {
+                  setSelectedReportId(null);
+                }
+                return run(() => api.deleteReport(id), "报告草稿已删除");
+              }}
+              onExport={async (id) => {
+                setError("");
+                const exported = await api.exportReportDocx(id);
+                if (exported) {
+                  setNotice(`DOCX 已保存到 ${exported}`);
+                }
+              }}
+              onSendEmail={(id, payload) => run(() => api.sendReportEmail(id, payload).then(() => undefined), "报告邮件已发送")}
+              onListEmailDeliveries={(id) => api.listReportEmailDeliveries(id)}
+              onNotice={(message) => setNotice(message)}
+            />
+          </div>
+
+          <div className={`tab-page-pane ${tab === "templates" ? "active" : "is-hidden"}`}>
+            <TemplatesPage
+              templates={templates}
+              onCreate={(payload) => run(() => api.createTemplate(payload).then(() => undefined), "模板已创建")}
+              onImportExample={async (payload) => {
+                if (activeAiTask) {
+                  setNotice(`当前已有 AI 任务「${activeAiTask.title}」在后台运行中，请稍候`);
+                  throw new Error("当前已有 AI 任务在运行中");
+                }
+                setError("");
+                setNotice("");
+                setActiveAiTask({ type: "import_template_example", title: "从示例提炼模板", tab: "templates" });
+                setNotice("正在后台调用 AI 从示例文档提炼模板，您可以切换菜单继续其他操作...");
+                try {
+                  const result = await api.importTemplateExample(payload);
+                  setActiveAiTask(null);
+                  setNotice("已成功从示例文档提炼出新模板正文");
+                  return result.content;
+                } catch (err) {
+                  setActiveAiTask(null);
+                  setError(err instanceof Error ? err.message : "提炼模板失败");
+                  throw err;
+                }
+              }}
+              onOptimize={async (payload) => {
+                if (activeAiTask) {
+                  setNotice(`当前已有 AI 任务「${activeAiTask.title}」在后台运行中，请稍候`);
+                  throw new Error("当前已有 AI 任务在运行中");
+                }
+                setError("");
+                setNotice("");
+                setActiveAiTask({ type: "optimize_template", title: "AI 优化模板", tab: "templates" });
+                setNotice("正在后台调用 AI 优化模板，您可以切换菜单继续其他操作...");
+                try {
+                  const result = await api.optimizeTemplate(payload);
+                  setActiveAiTask(null);
+                  setNotice("模板已由 AI 优化完成，请在对比弹窗中确认");
+                  return result.content;
+                } catch (err) {
+                  setActiveAiTask(null);
+                  setError(err instanceof Error ? err.message : "优化模板失败");
+                  throw err;
+                }
+              }}
+              onSave={(id, payload) => run(() => api.updateTemplate(id, payload).then(() => undefined), "模板已保存")}
+              onDelete={(id) => run(() => api.deleteTemplate(id), "模板已删除")}
+            />
+          </div>
+
+          <div className={`tab-page-pane ${tab === "settings" ? "active" : "is-hidden"}`}>
+            <SettingsPage
+              setting={llmSetting}
+              settings={llmSettings}
+              templates={templates}
+              emailSetting={emailSetting}
+              recipients={recipients}
+              reportSchedules={reportSchedules}
+              desktopPreferences={desktopPreferences}
+              migrationResult={migrationResult}
+              activitySources={activitySources}
+              activityCandidates={activityCandidates}
+              dailyCaptureSettings={dailyCaptureSettings}
+              dailyCaptureRuns={dailyCaptureRuns}
+              onSave={(payload) => run(
+                () => (payload.id
+                  ? api.updateLlmSetting(payload.id, payload)
+                  : api.createLlmSetting(payload)
+                ).then(() => undefined),
+                payload.id ? "LLM 设置已更新并应用" : "LLM 新设置已保存并应用"
+              )}
+              onApplyLlmSetting={(id) => run(() => api.applyLlmSetting(id).then(() => undefined), "LLM 配置已应用")}
+              onDeleteLlmSetting={(id) => run(() => api.deleteLlmSetting(id), "LLM 配置已删除")}
+              onSaveReportSchedule={(reportType, payload) => run(
+                () => api.updateReportSchedule(reportType, payload).then(() => undefined),
+                `${reportLabels[reportType]}定时设置已保存，当前${payload.enabled ? "已启用" : "已停用"}`
+              )}
+              onSaveEmail={(payload) => run(() => api.updateEmailSetting(payload).then(() => undefined), "SMTP 邮箱设置已保存")}
+              onTestEmail={(address) => run(() => api.testEmailSetting(address).then(() => undefined), "测试邮件已发送")}
+              onCreateRecipient={(payload) => run(() => api.createRecipient(payload).then(() => undefined), "收件人已添加")}
+              onUpdateRecipient={(id, payload) => run(() => api.updateRecipient(id, payload).then(() => undefined), "收件人已更新")}
+              onDeleteRecipient={(id) => run(() => api.deleteRecipient(id), "收件人已删除")}
+              onCreateActivitySource={(payload) => run(
+                () => api.createActivitySource(payload).then(() => undefined),
+                "采集目录已添加"
+              )}
+              onUpdateActivitySource={(id, payload) => run(
+                () => api.updateActivitySource(id, payload).then(() => undefined),
+                "采集目录已更新"
+              )}
+              onDeleteActivitySource={(id) => run(
+                () => api.deleteActivitySource(id),
+                "采集目录已删除"
+              )}
+              onSaveDailyCaptureSettings={(payload) => run(
+                () => api.updateDailyCaptureSettings(payload).then(() => undefined),
+                payload.enabled ? "每日自动记录已启用" : "每日自动记录设置已保存"
+              )}
+              onRunDailyCapture={async (date, forceOverwrite) => {
+                if (activeAiTask) {
+                  setNotice(`当前已有 AI 任务「${activeAiTask.title}」在后台运行中，请稍候`);
+                  throw new Error("当前已有 AI 任务在运行中");
+                }
+                setError("");
+                setNotice("");
+                setActiveAiTask({ type: "daily_capture", title: `扫描并AI总结${date}工作记录`, tab: "settings" });
+                setNotice(`正在后台扫描并提炼${date}工作记录，您可以切换菜单继续其他操作...`);
+                try {
+                  const result = await api.runDailyCapture(date, forceOverwrite);
+                  setActiveAiTask(null);
+                  setNotice(result.status === "skipped" ? "当天没有发现完成事项" : `每日工作记录扫描提炼完成（${date}）`);
+                  await refresh();
+                  return result;
+                } catch (err) {
+                  setActiveAiTask(null);
+                  setError(err instanceof Error ? err.message : "自动记录扫描失败");
+                  throw err;
+                }
+              }}
+              onSetLaunchAtLogin={async (enabled) => {
+                const next = await api.setLaunchAtLogin(enabled);
+                setDesktopPreferences(next);
+                setNotice(enabled ? "已启用开机启动" : "已关闭开机启动");
+              }}
+              onImportLegacy={async () => {
+                const result = await api.importLegacyDatabase();
+                if (result) {
+                  setMigrationResult(result);
+                  setNotice("旧版数据库导入完成");
+                  await refresh();
+                }
+              }}
+            />
+          </div>
         </div>
       </section>
 
@@ -1524,7 +1687,7 @@ function TabButton(props: {
   icon: React.ReactNode;
   onClick: () => void;
   children: React.ReactNode;
-  badge?: string | number;
+  badge?: string | number | React.ReactNode;
 }) {
   return (
     <button
@@ -1550,6 +1713,7 @@ interface WorkLogAiDialogueDialogProps {
   onApplyModification: (logId: number, payload: Partial<WorkLog>) => Promise<void>;
   onLoadIntoForm: (payload: Partial<WorkLog>, logId: number) => void;
   onOpenSettings?: () => void;
+  onAiChatActiveChange?: (active: boolean) => void;
 }
 
 interface DialogueMessageItem {
@@ -1598,6 +1762,16 @@ function WorkLogAiDialogueDialog(props: WorkLogAiDialogueDialogProps) {
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
   const dropdownRef = React.useRef<HTMLDivElement | null>(null);
   const abortRequestIdRef = React.useRef(0);
+
+  React.useEffect(() => {
+    props.onAiChatActiveChange?.(loading);
+  }, [loading, props.onAiChatActiveChange]);
+
+  React.useEffect(() => {
+    return () => {
+      props.onAiChatActiveChange?.(false);
+    };
+  }, [props.onAiChatActiveChange]);
 
   React.useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -2281,6 +2455,7 @@ function WorkLogsPage(props: {
   onClearTargetEditLog?: () => void;
   targetCreateDate?: string | null;
   onClearTargetCreateDate?: () => void;
+  onAiChatActiveChange?: (active: boolean) => void;
 }) {
   const emptyForm = React.useCallback(
     () => ({
@@ -2599,6 +2774,7 @@ function WorkLogsPage(props: {
             });
           }}
           onOpenSettings={props.onOpenSettings}
+          onAiChatActiveChange={props.onAiChatActiveChange}
         />
       )}
     </div>
@@ -2613,12 +2789,16 @@ function ReportsPage(props: {
   reports: Report[];
   templates: Template[];
   recipients: Recipient[];
+  selectedId?: number | null;
+  onSelectId?: (id: number | null) => void;
+  isGenerating?: boolean;
+  generatingTitle?: string | null;
   onGenerate: (payload: {
     report_type: ReportType;
     anchor_date?: string;
     template_id?: number;
     overwrite?: boolean;
-  }) => Promise<void>;
+  }) => Promise<Report | void>;
   onOptimize: (
     id: number,
     payload: { content: string; optimization_request: string }
@@ -2633,14 +2813,19 @@ function ReportsPage(props: {
   const [type, setType] = React.useState<ReportType>("weekly_report");
   const [anchor, setAnchor] = React.useState(today());
   const [templateId, setTemplateId] = React.useState("");
-  const [selectedId, setSelectedId] = React.useState<number | null>(null);
+  const [internalSelectedId, setInternalSelectedId] = React.useState<number | null>(null);
+  const selectedId = props.selectedId !== undefined ? props.selectedId : internalSelectedId;
+  const setSelectedId = (id: number | null) => {
+    setInternalSelectedId(id);
+    props.onSelectId?.(id);
+  };
   const selected = props.reports.find((item) => item.id === selectedId) ?? props.reports[0];
   const [draft, setDraft] = React.useState("");
   const [draftTitle, setDraftTitle] = React.useState("");
   const [viewMode, setViewMode] = React.useState<"edit" | "preview">("edit");
   const [copied, setCopied] = React.useState(false);
   const previewRef = React.useRef<HTMLDivElement>(null);
-  const [isGenerating, setIsGenerating] = React.useState(false);
+  const isGenerating = props.isGenerating ?? false;
   const [showOptimizationDialog, setShowOptimizationDialog] = React.useState(false);
   const [optimizationRequest, setOptimizationRequest] = React.useState("");
   const [isOptimizing, setIsOptimizing] = React.useState(false);
@@ -2718,21 +2903,22 @@ function ReportsPage(props: {
   }
 
   async function generateDraft() {
-    if (generationLock.current) {
+    if (isGenerating || generationLock.current) {
       return;
     }
     generationLock.current = true;
-    setIsGenerating(true);
     try {
-      await props.onGenerate({
+      const generated = await props.onGenerate({
         report_type: type,
         anchor_date: anchor,
         template_id: templateId ? Number(templateId) : undefined,
         overwrite: false
       });
+      if (generated && typeof generated === "object" && "id" in generated) {
+        setSelectedId(generated.id);
+      }
     } finally {
       generationLock.current = false;
-      setIsGenerating(false);
     }
   }
 
@@ -2888,10 +3074,17 @@ function ReportsPage(props: {
             onClick={() => void generateDraft()}
           >
             <RefreshCw className={isGenerating ? "spin" : undefined} size={18} />
-            {isGenerating ? "生成中" : "生成草稿"}
+            {isGenerating ? "后台生成中..." : "生成草稿"}
           </button>
         </div>
       </section>
+
+      {isGenerating && (
+        <div className="report-generating-banner">
+          <LoaderCircle className="spin" size={16} />
+          <span>正在后台生成{props.generatingTitle || "报告草稿"}，您可以自由切换到其他页面操作，生成完成后将自动通知并展示...</span>
+        </div>
+      )}
 
       <div className="report-grid">
         <section className="list-panel report-list-container">

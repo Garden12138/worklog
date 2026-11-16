@@ -247,6 +247,14 @@ async fn ensure_legacy_columns(pool: &SqlitePool) -> AppResult<()> {
     .execute(pool)
     .await?;
 
+    // Allow multiple reports per period by ensuring ix_reports_type_period is non-unique
+    sqlx::query("DROP INDEX IF EXISTS ix_reports_type_period")
+        .execute(pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS ix_reports_type_period ON reports(report_type, period_start, period_end)")
+        .execute(pool)
+        .await?;
+
     Ok(())
 }
 

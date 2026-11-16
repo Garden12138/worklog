@@ -125,6 +125,7 @@ pub fn run() {
             commands::delete_report,
             commands::optimize_report,
             commands::generate_report,
+            commands::list_active_generations,
             commands::export_report_docx,
             commands::list_report_email_deliveries,
             commands::send_report_email,

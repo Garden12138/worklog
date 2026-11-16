@@ -57,7 +57,7 @@ pub async fn generate(
         if !running.insert(key.clone()) {
             return Err(AppError::new(
                 "generation_in_progress",
-                "Report generation is already running for this period",
+                "该周期的报告正在后台生成中，请耐心等待完成，无需重复点击",
             ));
         }
     }
@@ -75,6 +75,54 @@ pub async fn generate(
     result
 }
 
+pub async fn resolve_unique_title(
+    pool: &SqlitePool,
+    base_title: &str,
+    exclude_id: Option<i64>,
+) -> AppResult<String> {
+    let rows: Vec<String> = if let Some(id) = exclude_id {
+        sqlx::query_scalar("SELECT title FROM reports WHERE id != ?")
+            .bind(id)
+            .fetch_all(pool)
+            .await?
+    } else {
+        sqlx::query_scalar("SELECT title FROM reports")
+            .fetch_all(pool)
+            .await?
+    };
+
+    let existing_titles: HashSet<String> = rows.into_iter().collect();
+
+    if !existing_titles.contains(base_title) {
+        return Ok(base_title.to_string());
+    }
+
+    let mut max_index: u32 = 0;
+    for title in &existing_titles {
+        if let Some(rest) = title.strip_prefix(base_title) {
+            let num_str = rest
+                .strip_prefix('（')
+                .and_then(|s| s.strip_suffix('）'))
+                .or_else(|| rest.strip_prefix('(').and_then(|s| s.strip_suffix(')')));
+            if let Some(num_str) = num_str {
+                if let Ok(n) = num_str.parse::<u32>() {
+                    max_index = max_index.max(n);
+                }
+            }
+        }
+    }
+
+    let mut next_index = max_index + 1;
+    loop {
+        let candidate_full = format!("{}（{}）", base_title, next_index);
+        let candidate_half = format!("{}({})", base_title, next_index);
+        if !existing_titles.contains(&candidate_full) && !existing_titles.contains(&candidate_half) {
+            return Ok(candidate_full);
+        }
+        next_index += 1;
+    }
+}
+
 async fn generate_inner(
     pool: &SqlitePool,
     secrets: &SecretStore,
@@ -84,37 +132,19 @@ async fn generate_inner(
     template_id: Option<i64>,
     overwrite: bool,
 ) -> AppResult<GenerateResponse> {
-    let existing = sqlx::query_as::<_, ReportRow>(
-        "SELECT id, report_type, title, period_start, period_end, template_id, content_markdown, status, source_log_ids, generated_at, edited_at, created_at, updated_at \
-         FROM reports WHERE report_type=? AND period_start=? AND period_end=?",
-    )
-    .bind(report_type)
-    .bind(period_start)
-    .bind(period_end)
-    .fetch_optional(pool)
-    .await?;
-    if let Some(existing) = existing.as_ref().filter(|_| !overwrite) {
-        let now = now_string();
-        let task_id = sqlx::query(
-            "INSERT INTO generation_tasks(report_type, period_start, period_end, status, message, report_id, completed_at, created_at, updated_at) \
-             VALUES(?, ?, ?, 'skipped', 'Report already exists; existing draft was not overwritten.', ?, ?, ?, ?)",
+    let existing = if overwrite {
+        sqlx::query_as::<_, ReportRow>(
+            "SELECT id, report_type, title, period_start, period_end, template_id, content_markdown, status, source_log_ids, generated_at, edited_at, created_at, updated_at \
+             FROM reports WHERE report_type=? AND period_start=? AND period_end=? ORDER BY id DESC LIMIT 1",
         )
         .bind(report_type)
         .bind(period_start)
         .bind(period_end)
-        .bind(existing.id)
-        .bind(&now)
-        .bind(&now)
-        .bind(&now)
-        .execute(pool)
+        .fetch_optional(pool)
         .await?
-        .last_insert_rowid();
-        return Ok(GenerateResponse {
-            report: existing.clone().into(),
-            task_id,
-            used_llm: false,
-        });
-    }
+    } else {
+        None
+    };
 
     let now = now_string();
     let task_id = sqlx::query(
@@ -142,20 +172,33 @@ async fn generate_inner(
         .fetch_all(pool)
         .await?;
         let config = active_config(pool, secrets).await?;
-        let (content, used_llm, title) = if requires_llm_fill(&template.content) {
+
+        let base_title = format!("{} 至 {} {}", period_start, period_end, report_title(report_type));
+        let title = if let Some(existing) = &existing {
+            existing.title.clone()
+        } else {
+            resolve_unique_title(pool, &base_title, None).await?
+        };
+
+        let (content, used_llm) = if requires_llm_fill(&template.name, &template.content) {
             let generated = fill_template(
                 config.as_ref(),
                 report_type,
                 period_start,
                 period_end,
+                &title,
                 &logs,
                 &template.content,
             )
             .await?;
+            let filled = if title != base_title && generated.content.contains(&base_title) {
+                generated.content.replacen(&base_title, &title, 1)
+            } else {
+                generated.content
+            };
             (
-                generated.content,
+                filled,
                 generated.used_llm,
-                format!("{} 至 {} {}", period_start, period_end, report_title(report_type)),
             )
         } else {
             let generated = generate_report(
@@ -166,7 +209,7 @@ async fn generate_inner(
                 &logs,
             )
             .await?;
-            let context = build_context(
+            let mut context = build_context(
                 report_type,
                 period_start,
                 period_end,
@@ -174,8 +217,9 @@ async fn generate_inner(
                 generated.content,
                 local_datetime(),
             );
+            context.title = title.clone();
             let content = render_template(&template.content, &context)?;
-            (content, generated.used_llm, context.title)
+            (content, generated.used_llm)
         };
         let source_ids = serde_json::to_string(&logs.iter().map(|item| item.id).collect::<Vec<_>>())?;
         let timestamp = now_string();
@@ -389,6 +433,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolves_duplicate_titles_with_numbered_suffixes() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "worklog-title-test-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = Database::open_for_test(directory, None).await.unwrap();
+
+        let base = "2026-11-02 至 2026-11-08 周报";
+        assert_eq!(
+            resolve_unique_title(&database.pool, base, None).await.unwrap(),
+            base
+        );
+
+        // Insert first report
+        let id1: i64 = sqlx::query_scalar(
+            "INSERT INTO reports(report_type, title, period_start, period_end, content_markdown, status, created_at, updated_at) \
+             VALUES('weekly_report', ?, '2026-11-02', '2026-11-08', '# content', 'draft', '2026-11-02T00:00:00Z', '2026-11-02T00:00:00Z') RETURNING id",
+        )
+        .bind(base)
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+
+        // Second should be （1）
+        assert_eq!(
+            resolve_unique_title(&database.pool, base, None).await.unwrap(),
+            format!("{}（1）", base)
+        );
+
+        // Insert second report
+        let id2: i64 = sqlx::query_scalar(
+            "INSERT INTO reports(report_type, title, period_start, period_end, content_markdown, status, created_at, updated_at) \
+             VALUES('weekly_report', ?, '2026-11-02', '2026-11-08', '# content', 'draft', '2026-11-02T00:00:00Z', '2026-11-02T00:00:00Z') RETURNING id",
+        )
+        .bind(format!("{}（1）", base))
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+
+        // Third should be （2）
+        assert_eq!(
+            resolve_unique_title(&database.pool, base, None).await.unwrap(),
+            format!("{}（2）", base)
+        );
+
+        // When excluding id2, （1） becomes available
+        assert_eq!(
+            resolve_unique_title(&database.pool, base, Some(id2)).await.unwrap(),
+            format!("{}（1）", base)
+        );
+
+        // When excluding id1, base title becomes available
+        assert_eq!(
+            resolve_unique_title(&database.pool, base, Some(id1)).await.unwrap(),
+            base
+        );
+    }
+
+    #[tokio::test]
     async fn generates_a_fallback_report_without_an_llm_key() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -430,7 +538,7 @@ mod tests {
         assert_eq!(generated.report.period_start, "2026-06-01");
         assert_eq!(generated.report.period_end, "2026-06-30");
 
-        sqlx::query("UPDATE reports SET content_markdown='# 手工修改后不可覆盖' WHERE id=?")
+        sqlx::query("UPDATE reports SET content_markdown='# 手工修改后保留' WHERE id=?")
             .bind(generated.report.id)
             .execute(&database.pool)
             .await
@@ -456,7 +564,33 @@ mod tests {
                 .fetch_one(&database.pool)
                 .await
                 .unwrap();
-        assert_eq!(task_status, "skipped");
-        assert_eq!(duplicate.report.content_markdown, "# 手工修改后不可覆盖");
+        assert_eq!(task_status, "success");
+        assert_ne!(duplicate.report.id, generated.report.id);
+        assert_eq!(duplicate.report.title, "2026-06-01 至 2026-06-30 月报（1）");
+
+        let third = generate(
+            &database.pool,
+            &SecretStore::memory(),
+            &Arc::new(Mutex::new(HashSet::new())),
+            ReportGenerateInput {
+                report_type: "monthly_report".into(),
+                anchor_date: Some("2026-06-23".into()),
+                period_start: None,
+                period_end: None,
+                template_id: None,
+                overwrite: false,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(third.report.title, "2026-06-01 至 2026-06-30 月报（2）");
+
+        let total_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM reports WHERE report_type='monthly_report' AND period_start='2026-06-01'",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(total_count, 3);
     }
 }

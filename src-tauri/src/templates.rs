@@ -82,13 +82,31 @@ pub fn validate_template(content: &str) -> AppResult<()> {
     Ok(())
 }
 
-pub fn requires_llm_fill(content: &str) -> bool {
-    if content.contains("{{") || content.contains("{%") {
-        return false;
+pub fn requires_llm_fill(template_name: &str, content: &str) -> bool {
+    let name_lower = template_name.to_lowercase();
+    if name_lower.contains("short")
+        || name_lower.contains("简报")
+        || name_lower.contains("精简")
+        || name_lower.contains("条目")
+        || name_lower.contains("短")
+    {
+        return true;
     }
-    Regex::new(r"【(?:填写|说明)[^】]*】|_{3,}")
-        .unwrap()
-        .is_match(content)
+
+    let fill_pattern = Regex::new(r"【[^】]*(?:填写|说明|要求|输出|格式|请按)[^】]*】|_{3,}").unwrap();
+    if fill_pattern.is_match(content) {
+        return true;
+    }
+
+    let has_ai_slot = content.contains("ai_content")
+        || content.contains("summary")
+        || content.contains("raw_llm_content");
+
+    if !has_ai_slot && (content.contains("work_items") || content.contains("item")) {
+        return true;
+    }
+
+    false
 }
 
 pub fn build_context(
@@ -283,7 +301,11 @@ mod tests {
 
     #[test]
     fn recognizes_plain_placeholder_templates() {
-        assert!(requires_llm_fill("月份：____\n【填写核心任务】"));
-        assert!(!requires_llm_fill("# {{ title }}"));
+        assert!(requires_llm_fill("", "月份：____\n【填写核心任务】"));
+        assert!(requires_llm_fill("garden_bojin_weekly_short", "# {{ title }}"));
+        assert!(requires_llm_fill("短周报", "# {{ title }}"));
+        assert!(requires_llm_fill("", "# {{ title }}\n{% for item in work_items %}{{ item.task }}{% endfor %}"));
+        assert!(!requires_llm_fill("默认周报模板", "# {{ title }}\n{{ ai_content }}\n{{ work_items }}"));
+        assert!(!requires_llm_fill("默认周报模板", "# {{ title }}"));
     }
 }

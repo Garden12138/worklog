@@ -1332,6 +1332,18 @@ textarea:focus-visible {
   flex-direction: column;
 }
 
+.tab-page-pane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.tab-page-pane.is-hidden {
+  display: none !important;
+}
+
 .topbar,
 .two-column,
 .reports-layout,
@@ -1404,6 +1416,30 @@ textarea:focus-visible {
   background: var(--danger-soft);
   border: 1px solid #f0c4c5;
   color: #9d292d;
+}
+
+.report-generating-banner {
+  align-items: center;
+  border-radius: var(--radius-md);
+  display: flex;
+  font-size: 13px;
+  font-weight: 500;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #1d4ed8;
+  animation: pulse-border 2s infinite ease-in-out;
+}
+
+@keyframes pulse-border {
+  0%, 100% {
+    border-color: #bfdbfe;
+  }
+  50% {
+    border-color: #60a5fa;
+  }
 }
 
 .two-column {
@@ -1552,11 +1588,11 @@ textarea:focus-visible {
 
 .editor-body {
   flex: 1;
-  overflow-y: auto;
   min-height: 0;
-  padding: 16px 20px;
+  padding: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .editor-body .markdown-editor {
@@ -2256,11 +2292,13 @@ textarea {
 }
 
 .editor-panel {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  height: min(700px, calc(100vh - 144px));
-  min-height: 560px;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  max-height: 100%;
+  min-height: 0;
   overflow: hidden;
+  padding: 0;
 }
 
 .editor-toolbar {
@@ -2272,6 +2310,7 @@ textarea {
   grid-template-columns: minmax(0, 1fr) auto auto auto auto auto auto auto;
   padding: 11px;
   z-index: 1;
+  flex-shrink: 0;
 }
 
 .editor-toolbar input {
@@ -2627,11 +2666,16 @@ textarea {
 }
 
 .editor-body {
+  flex: 1;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
   overflow: hidden;
 }
 
 .markdown-editor {
+  flex: 1;
   background: #ffffff;
   border: 0;
   border-radius: 0;
@@ -2660,11 +2704,18 @@ textarea {
   min-height: 360px;
 }
 
+.report-grid .editor-empty {
+  height: 100%;
+  max-height: 100%;
+  min-height: 0;
+}
+
 .editor-empty h2 {
   color: var(--ink-secondary);
 }
 
 .markdown-preview {
+  flex: 1;
   background: #ffffff;
   color: var(--ink);
   height: 100%;
@@ -3865,19 +3916,6 @@ textarea {
   .generation-panel {
     grid-template-columns: 1fr;
   }
-
-  .report-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .report-grid .list-panel {
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  }
-
-  .report-grid .list-panel-header,
-  .report-grid .empty-state {
-    grid-column: 1 / -1;
-  }
 }
 
 @media (max-width: 1080px) {
@@ -4098,11 +4136,6 @@ textarea {
 
   .pagination .secondary {
     flex: 1 1 0;
-  }
-
-  .report-grid .list-panel {
-    display: grid;
-    grid-template-columns: 1fr;
   }
 
   .import-example-header {
