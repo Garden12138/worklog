@@ -1558,16 +1558,12 @@ function App() {
         <header className="topbar">
           <div>
             <p className="eyebrow status-line" aria-live="polite">
-              {loading || Boolean(activeAiTask) ? <LoaderCircle className="spin" size={14} /> : <CheckCircle2 size={14} />}
-              {activeAiTask
-                ? `正在后台运行【${activeAiTask.title}】`
-                : loading
-                ? "正在同步本地数据"
-                : "本地工作空间"}
+              {loading ? <LoaderCircle className="spin" size={14} /> : <CheckCircle2 size={14} />}
+              {loading ? "正在同步本地数据" : "本地工作空间"}
             </p>
             <h1>{tabTitle(tab)}</h1>
           </div>
-          <button className="icon-button" type="button" title="刷新数据" aria-label="刷新数据" disabled={loading || Boolean(activeAiTask)} onClick={() => void refresh()}>
+          <button className="icon-button" type="button" title="刷新数据" aria-label="刷新数据" disabled={loading} onClick={() => void refresh()}>
             <RefreshCw size={18} />
           </button>
         </header>
@@ -3370,24 +3366,12 @@ function ReportsPage(props: {
             onClick={() => void generateDraft()}
           >
             <RefreshCw className={isGenerating ? "spin" : undefined} size={18} />
-            {isGenerating ? "后台生成中..." : "生成草稿"}
+            {isGenerating ? "生成中..." : "生成草稿"}
           </button>
-        </div>
-      </section>
-
-      {isGenerating && (
-        <div className="report-generating-banner">
-          <div className="report-generating-content">
-            <LoaderCircle className="spin" size={16} />
-            <span>
-              正在后台生成{props.generatingTitle || "报告草稿"}
-              {props.stepProgress ? `（${props.stepProgress}）` : ""}，您可以自由切换到其他页面操作，生成完成后将自动通知并展示...
-            </span>
-          </div>
-          {props.onCancelGeneration && (
+          {isGenerating && props.onCancelGeneration && (
             <button
+              className="secondary danger"
               type="button"
-              className="report-generating-cancel"
               disabled={props.isCancelling}
               onClick={props.onCancelGeneration}
             >
@@ -3395,7 +3379,7 @@ function ReportsPage(props: {
             </button>
           )}
         </div>
-      )}
+      </section>
 
       <div className="report-grid">
         <section className="list-panel report-list-container">
