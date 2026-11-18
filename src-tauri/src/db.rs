@@ -600,4 +600,65 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
     }
+
+    #[tokio::test]
+    async fn migrates_legacy_xcli_path_without_modifying_custom_paths() {
+        let directory = test_directory("xcli-migration");
+        let database = Database::open_for_test(directory, None).await.unwrap();
+        let now = now_string();
+
+        let legacy_dev_path = format!("/{}/cengjiada/Documents/github/xcli/bin/xcli", "Users");
+        let custom_xcli_path = "/usr/local/custom/xcli";
+
+        // Insert legacy dev record
+        sqlx::query(
+            "INSERT INTO llm_settings(provider, base_url, model, api_key, extra_headers, timeout_seconds, is_active, created_at, updated_at) \
+             VALUES('xcli', ?, '', '', '{}', 180, 0, ?, ?)",
+        )
+        .bind(&legacy_dev_path)
+        .bind(&now)
+        .bind(&now)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+
+        // Insert custom xcli record
+        sqlx::query(
+            "INSERT INTO llm_settings(provider, base_url, model, api_key, extra_headers, timeout_seconds, is_active, created_at, updated_at) \
+             VALUES('xcli', ?, 'custom-model', '', '{}', 180, 0, ?, ?)",
+        )
+        .bind(custom_xcli_path)
+        .bind(&now)
+        .bind(&now)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+
+        // Run migration
+        let affected = migrate_legacy_xcli_path(&database.pool).await.unwrap();
+        assert!(affected >= 1);
+
+        // Verify the legacy path was updated to 'xcli'
+        let legacy_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM llm_settings WHERE provider = 'xcli' AND base_url = ?",
+        )
+        .bind(&legacy_dev_path)
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(legacy_count, 0);
+
+        // Verify the custom path was NOT modified
+        let custom_val: String = sqlx::query_scalar(
+            "SELECT base_url FROM llm_settings WHERE provider = 'xcli' AND model = 'custom-model'",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        assert_eq!(custom_val, custom_xcli_path);
+
+        // Verify idempotency
+        let second_run = migrate_legacy_xcli_path(&database.pool).await.unwrap();
+        assert_eq!(second_run, 0);
+    }
 }

@@ -1772,6 +1772,40 @@ if cmd == "cancel":
         assert!(!formatted.contains("## 阻碍与风险"));
     }
 
+    #[test]
+    fn test_resolve_xcli_path_from_home_local_bin() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "xcli-test-home-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        let local_bin = temp_dir.join(".local").join("bin");
+        fs::create_dir_all(&local_bin).unwrap();
+        let fake_xcli = local_bin.join("xcli");
+        fs::write(&fake_xcli, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&fake_xcli).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&fake_xcli, perms).unwrap();
+        }
+
+        let resolved = resolve_xcli_path_with_env(
+            Some("xcli"),
+            None,
+            None,
+            Some(&temp_dir),
+        );
+        assert_eq!(resolved, fake_xcli);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
     #[tokio::test]
     #[ignore]
     async fn test_real_xcli_integration() {
