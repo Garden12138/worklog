@@ -2201,7 +2201,7 @@ mod tests {
         assert!(provider_defaults("unsupported").is_err());
         assert_eq!(
             provider_defaults("xcli").unwrap(),
-            (crate::xcli::DEFAULT_XCLI_PATH, "", 180)
+            ("xcli", "", 180)
         );
     }
 

@@ -100,7 +100,7 @@ const providerLabels: Record<Provider, string> = {
 };
 
 const providerDefaults: Record<Provider, { base_url: string; model: string; timeout_seconds: number }> = {
-  xcli: { base_url: "/Users/cengjiada/Documents/github/xcli/bin/xcli", model: "", timeout_seconds: 180 },
+  xcli: { base_url: "xcli", model: "", timeout_seconds: 180 },
   openai: { base_url: "https://api.openai.com/v1", model: "gpt-4.1-mini", timeout_seconds: 60 },
   nvidia: { base_url: "https://integrate.api.nvidia.com/v1", model: "meta/llama-3.1-70b-instruct", timeout_seconds: 180 },
   openrouter: { base_url: "https://openrouter.ai/api/v1", model: "openai/gpt-4.1-mini", timeout_seconds: 60 },
@@ -5055,7 +5055,7 @@ function LlmSettingModal(props: {
                   <div className="input-with-button">
                     <input
                       value={form.base_url}
-                      placeholder="/Users/cengjiada/Documents/github/xcli/bin/xcli 或系统 xcli"
+                      placeholder="xcli（默认依次从 XCLI_PATH、PATH、~/.local/bin 查找），或填写绝对路径"
                       onChange={(e) => setForm({ ...form, base_url: e.target.value })}
                     />
                     <button

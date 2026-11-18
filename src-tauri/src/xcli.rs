@@ -16,7 +16,7 @@ use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
-pub const DEFAULT_XCLI_PATH: &str = "/Users/cengjiada/Documents/github/xcli/bin/xcli";
+pub const DEFAULT_XCLI_PATH: &str = "xcli";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionInfo {
@@ -155,18 +155,33 @@ pub struct StructuredReportOutput {
     pub next: Vec<String>,
 }
 
+#[allow(dead_code)]
 pub fn expand_tilde(path_str: &str) -> PathBuf {
-    if let Some(rest) = path_str.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(rest);
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    expand_tilde_with_home(path_str, home.as_deref())
+}
+
+pub(crate) fn expand_tilde_with_home(path_str: &str, home: Option<&Path>) -> PathBuf {
+    if path_str == "~" {
+        if let Some(home) = home {
+            return home.to_path_buf();
+        }
+    } else if let Some(rest) = path_str.strip_prefix("~/") {
+        if let Some(home) = home {
+            return home.join(rest);
         }
     }
     PathBuf::from(path_str)
 }
 
+#[allow(dead_code)]
 pub fn find_in_path(cmd: &str) -> Option<PathBuf> {
-    if let Some(paths) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&paths) {
+    find_in_path_env(cmd, std::env::var_os("PATH").as_deref())
+}
+
+pub(crate) fn find_in_path_env(cmd: &str, path_env: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    if let Some(paths) = path_env {
+        for dir in std::env::split_paths(paths) {
             let full = dir.join(cmd);
             if full.is_file() {
                 return Some(full);
@@ -177,56 +192,75 @@ pub fn find_in_path(cmd: &str) -> Option<PathBuf> {
 }
 
 pub fn resolve_xcli_path(config: Option<&LlmConfig>) -> PathBuf {
-    // 1. Priority 1: User-configured path from database (Settings -> AI 模型配置)
-    if let Some(config) = config {
-        let trimmed = config.base_url.trim();
+    let configured = config.map(|c| c.base_url.as_str());
+    let xcli_path_env = std::env::var("XCLI_PATH").ok();
+    let path_env = std::env::var_os("PATH");
+    let home_env = std::env::var_os("HOME").map(PathBuf::from);
+
+    resolve_xcli_path_with_env(
+        configured,
+        xcli_path_env.as_deref(),
+        path_env.as_deref(),
+        home_env.as_deref(),
+    )
+}
+
+pub(crate) fn resolve_xcli_path_with_env(
+    configured_path: Option<&str>,
+    xcli_path_env: Option<&str>,
+    path_env: Option<&std::ffi::OsStr>,
+    home_env: Option<&Path>,
+) -> PathBuf {
+    // 1. If user configured a specific path or command name in database (and it's not the default "xcli" nor empty/http)
+    if let Some(raw_path) = configured_path {
+        let trimmed = raw_path.trim();
         if !trimmed.is_empty()
+            && trimmed != DEFAULT_XCLI_PATH
             && !trimmed.starts_with("http://")
             && !trimmed.starts_with("https://")
         {
-            let expanded = expand_tilde(trimmed);
+            let expanded = expand_tilde_with_home(trimmed, home_env);
             if expanded.exists() {
                 return expanded;
             }
             if !trimmed.contains('/') && !trimmed.contains('\\') {
-                if let Some(found) = find_in_path(trimmed) {
+                if let Some(found) = find_in_path_env(trimmed, path_env) {
                     return found;
                 }
+            }
+            // Explicit path given by user (absolute or containing path separators)
+            if trimmed.contains('/') || trimmed.contains('\\') {
+                return expanded;
             }
         }
     }
 
-    // 2. Priority 2: Environment variable XCLI_PATH
-    if let Ok(env_path) = std::env::var("XCLI_PATH") {
+    // Default resolution order: XCLI_PATH -> PATH -> ~/.local/bin/xcli -> "xcli"
+    // Priority 1: Environment variable XCLI_PATH
+    if let Some(env_path) = xcli_path_env {
         let trimmed = env_path.trim();
         if !trimmed.is_empty() {
-            let expanded = expand_tilde(trimmed);
+            let expanded = expand_tilde_with_home(trimmed, home_env);
             if expanded.exists() {
                 return expanded;
             }
         }
     }
 
-    // 3. Priority 3: System PATH binary
-    if let Some(found) = find_in_path("xcli") {
+    // Priority 2: System PATH binary
+    if let Some(found) = find_in_path_env("xcli", path_env) {
         return found;
     }
 
-    // 4. Priority 4: User standard directory ~/.local/bin/xcli
-    if let Ok(home) = std::env::var("HOME") {
-        let home_bin = PathBuf::from(home).join(".local/bin/xcli");
+    // Priority 3: User standard directory ~/.local/bin/xcli
+    if let Some(home) = home_env {
+        let home_bin = home.join(".local/bin/xcli");
         if home_bin.exists() {
             return home_bin;
         }
     }
 
-    // 5. Priority 5: Default dev binary path if present
-    let default_path = PathBuf::from(DEFAULT_XCLI_PATH);
-    if default_path.exists() {
-        return default_path;
-    }
-
-    PathBuf::from("xcli")
+    PathBuf::from(DEFAULT_XCLI_PATH)
 }
 
 pub fn report_json_schema() -> Value {

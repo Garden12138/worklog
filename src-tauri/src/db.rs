@@ -243,14 +243,11 @@ async fn ensure_legacy_columns(pool: &SqlitePool) -> AppResult<()> {
             .await
             .unwrap_or(false);
     if !has_xcli {
-        let xcli_path = crate::xcli::resolve_xcli_path(None);
-        let path_str = xcli_path.to_str().unwrap_or(crate::xcli::DEFAULT_XCLI_PATH);
         let now = now_string();
         let _ = sqlx::query(
             "INSERT INTO llm_settings (provider, base_url, model, api_key, extra_headers, timeout_seconds, is_active, created_at, updated_at) \
-             VALUES ('xcli', ?, '', '', '{}', 180, 0, ?, ?)",
+             VALUES ('xcli', 'xcli', '', '', '{}', 180, 0, ?, ?)",
         )
-        .bind(path_str)
         .bind(&now)
         .bind(&now)
         .execute(pool)
