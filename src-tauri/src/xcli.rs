@@ -1775,9 +1775,12 @@ if cmd == "cancel":
     #[tokio::test]
     #[ignore]
     async fn test_real_xcli_integration() {
-        let real_xcli = PathBuf::from("/Users/cengjiada/Documents/github/xcli/bin/xcli");
-        if !real_xcli.exists() {
-            eprintln!("Real xcli binary not found at {:?}", real_xcli);
+        let real_xcli = resolve_xcli_path(None);
+        if !real_xcli.is_file() {
+            eprintln!(
+                "Real xcli binary not found (resolved to {:?}); skipping test",
+                real_xcli
+            );
             return;
         }
 
