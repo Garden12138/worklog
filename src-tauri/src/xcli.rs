@@ -1204,6 +1204,10 @@ mod tests {
     use super::*;
     use std::fs;
 
+    fn set_fake_xcli_mode(dir: &Path, mode: &str) {
+        fs::write(dir.join("fake_mode.txt"), mode).unwrap();
+    }
+
     fn make_fake_xcli(dir: &Path) -> PathBuf {
         let fake = dir.join("fake_xcli.py");
         let script = r#"#!/usr/bin/env python3
@@ -1220,7 +1224,14 @@ if hasattr(sys.stderr, "reconfigure"):
     except Exception:
         pass
 
-mode = os.environ.get("FAKE_XCLI_MODE", "normal")
+script_dir = os.path.dirname(os.path.abspath(__file__))
+mode_file = os.path.join(script_dir, "fake_mode.txt")
+if os.path.isfile(mode_file):
+    with open(mode_file, "r", encoding="utf-8") as f:
+        mode = f.read().strip()
+else:
+    mode = os.environ.get("FAKE_XCLI_MODE", "normal")
+
 args = sys.argv[1:]
 
 if not args:
@@ -1251,6 +1262,8 @@ if cmd == "submit":
     assert "summary" in req["schema"]["properties"]
     assert req["schema"]["additionalProperties"] is False
     rec_file = os.environ.get("FAKE_XCLI_REQ_RECORD")
+    if not rec_file:
+        rec_file = os.path.join(script_dir, "req_record.json")
     if rec_file:
         with open(rec_file, "w", encoding="utf-8") as f:
             f.write(raw)
@@ -1385,6 +1398,8 @@ if cmd == "result":
 if cmd == "cancel":
     task_id = args[1]
     rec = os.environ.get("FAKE_XCLI_CANCEL_RECORD")
+    if not rec:
+        rec = os.path.join(script_dir, "cancel_record.txt")
     if rec:
         with open(rec, "w", encoding="utf-8") as f:
             f.write(task_id)
@@ -1392,6 +1407,7 @@ if cmd == "cancel":
     sys.exit(0)
 "#;
         fs::write(&fake, script).unwrap();
+        set_fake_xcli_mode(dir, "normal");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1410,8 +1426,6 @@ if cmd == "cancel":
         let fake_cli = make_fake_xcli(&temp_dir);
 
         let record_path = temp_dir.join("req_record.json");
-        std::env::set_var("FAKE_XCLI_MODE", "normal");
-        std::env::set_var("FAKE_XCLI_REQ_RECORD", record_path.to_str().unwrap());
 
         let mut metadata = HashMap::new();
         metadata.insert("app".into(), "worklog".into());
@@ -1434,8 +1448,6 @@ if cmd == "cancel":
         assert_eq!(parsed["permission"], "read");
         assert_eq!(parsed["schema"]["additionalProperties"], false);
 
-        std::env::remove_var("FAKE_XCLI_MODE");
-        std::env::remove_var("FAKE_XCLI_REQ_RECORD");
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
@@ -1444,8 +1456,6 @@ if cmd == "cancel":
         let temp_dir = std::env::temp_dir().join(format!("xcli-test-logs-{}", std::process::id()));
         fs::create_dir_all(&temp_dir).unwrap();
         let fake_cli = make_fake_xcli(&temp_dir);
-
-        std::env::set_var("FAKE_XCLI_MODE", "normal");
 
         let mut events_received = Vec::new();
         let result = stream_task_logs(&fake_cli, "t-fake-task-123", 0, |ev| {
@@ -1470,7 +1480,6 @@ if cmd == "cancel":
             .iter()
             .any(|t| t.contains("自动切换: codex -> antigravity")));
 
-        std::env::remove_var("FAKE_XCLI_MODE");
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
@@ -1479,8 +1488,7 @@ if cmd == "cancel":
         let temp_dir = std::env::temp_dir().join(format!("xcli-test-err-{}", std::process::id()));
         fs::create_dir_all(&temp_dir).unwrap();
         let fake_cli = make_fake_xcli(&temp_dir);
-
-        std::env::set_var("FAKE_XCLI_MODE", "submit_fail");
+        set_fake_xcli_mode(&temp_dir, "submit_fail");
 
         let req = XcliRequest::new_ask("测试".into(), vec![], None);
 
@@ -1492,7 +1500,6 @@ if cmd == "cancel":
         let err2 = submit_task(&bad_path, &req).await.unwrap_err();
         assert_eq!(err2.code, "xcli_launch_failed");
 
-        std::env::remove_var("FAKE_XCLI_MODE");
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
@@ -1502,8 +1509,7 @@ if cmd == "cancel":
             std::env::temp_dir().join(format!("xcli-test-broken-{}", std::process::id()));
         fs::create_dir_all(&temp_dir).unwrap();
         let fake_cli = make_fake_xcli(&temp_dir);
-
-        std::env::set_var("FAKE_XCLI_MODE", "submit_broken");
+        set_fake_xcli_mode(&temp_dir, "submit_broken");
 
         let req = XcliRequest::new_ask("测试".into(), vec![], None);
 
@@ -1518,7 +1524,6 @@ if cmd == "cancel":
         let val_err2 = validate_report_output(Some(&bad_json)).unwrap_err();
         assert_eq!(val_err2.code, "xcli_invalid_output_structure");
 
-        std::env::remove_var("FAKE_XCLI_MODE");
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
@@ -1530,7 +1535,6 @@ if cmd == "cancel":
         let fake_cli = make_fake_xcli(&temp_dir);
 
         let cancel_marker = temp_dir.join("cancel_record.txt");
-        std::env::set_var("FAKE_XCLI_CANCEL_RECORD", cancel_marker.to_str().unwrap());
 
         cancel_task(&fake_cli, "t-test-cancel-999").await.unwrap();
         assert_eq!(
@@ -1538,7 +1542,6 @@ if cmd == "cancel":
             "t-test-cancel-999"
         );
 
-        std::env::remove_var("FAKE_XCLI_CANCEL_RECORD");
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
@@ -1547,8 +1550,7 @@ if cmd == "cancel":
         let temp_dir = std::env::temp_dir().join(format!("xcli-test-seq-{}", std::process::id()));
         fs::create_dir_all(&temp_dir).unwrap();
         let fake_cli = make_fake_xcli(&temp_dir);
-
-        std::env::set_var("FAKE_XCLI_MODE", "disconnect_at_3");
+        set_fake_xcli_mode(&temp_dir, "disconnect_at_3");
 
         let mut events1 = Vec::new();
         let res1 = stream_task_logs(&fake_cli, "t-fake-task-123", 0, |ev| {
@@ -1561,7 +1563,7 @@ if cmd == "cancel":
         assert_eq!(last_seq, 3);
 
         // Resume after seq 3
-        std::env::set_var("FAKE_XCLI_MODE", "normal");
+        set_fake_xcli_mode(&temp_dir, "normal");
         let mut events2 = Vec::new();
         let res2 = stream_task_logs(&fake_cli, "t-fake-task-123", last_seq, |ev| {
             events2.push(ev);
@@ -1574,7 +1576,6 @@ if cmd == "cancel":
         assert_eq!(events2.first().unwrap().seq, 4);
         assert_eq!(events2.last().unwrap().seq, 7);
 
-        std::env::remove_var("FAKE_XCLI_MODE");
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
@@ -1637,7 +1638,6 @@ if cmd == "cancel":
         .unwrap()
         .last_insert_rowid();
 
-        std::env::set_var("FAKE_XCLI_MODE", "normal");
         let mut progress_list = Vec::new();
 
         let report = execute_task_lifecycle(&db.pool, &fake_cli, gen_id, |status, p| {
@@ -1669,7 +1669,6 @@ if cmd == "cancel":
         assert_eq!(task_row.report_id, Some(report.id));
         assert!(task_row.last_seq.unwrap_or(0) >= 6);
 
-        std::env::remove_var("FAKE_XCLI_MODE");
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
