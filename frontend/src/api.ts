@@ -11,6 +11,7 @@ import type {
   DesktopPreferences,
   EmailSetting,
   GenerateResponse,
+  GenerationTaskStatus,
   LlmSetting,
   MigrationResult,
   PaginatedWorkLogs,
@@ -26,7 +27,8 @@ import type {
   WorkLog,
   ChatMessage,
   WorkLogDialogueResponse,
-  WorkReportSummary
+  WorkReportSummary,
+  XcliConnectionInfo
 } from "./types";
 
 function asError(error: unknown): Error {
@@ -95,6 +97,17 @@ export const api = {
     template_id?: number;
     overwrite?: boolean;
   }) => call<GenerateResponse>("generate_report", { payload }),
+  startReportGeneration: (payload: {
+    report_type: ReportType;
+    anchor_date?: string;
+    period_start?: string;
+    period_end?: string;
+    template_id?: number;
+    overwrite?: boolean;
+  }) => call<GenerationTaskStatus>("start_report_generation", { payload }),
+  getActiveGenerationTask: () => call<GenerationTaskStatus | null>("get_active_generation_task"),
+  cancelGenerationTask: (taskId: number) => call<void>("cancel_generation_task", { taskId }),
+  recoverGenerationTask: (taskId: number) => call<GenerationTaskStatus>("recover_generation_task", { taskId }),
   exportReportDocx: async (reportId: number) => {
     const path = await save({
       defaultPath: `worklog-report-${reportId}.docx`,
@@ -121,7 +134,7 @@ export const api = {
 
   getLlmSetting: () => call<LlmSetting | null>("get_llm_setting"),
   listLlmSettings: () => call<LlmSetting[]>("list_llm_settings"),
-  testXcliConnection: (id: number) => call<{ model: string; inference_location: "local" | "remote" | "unknown" }>("test_xcli_connection", { id }),
+  testXcliConnection: (id: number) => call<XcliConnectionInfo>("test_xcli_connection", { id }),
   createLlmSetting: (payload: LlmSetting) =>
     call<LlmSetting>("create_llm_setting", { payload }),
   updateLlmSetting: (id: number, payload: LlmSetting) =>
@@ -175,6 +188,15 @@ export const api = {
       return [];
     }
     return Array.isArray(selected) ? selected : [selected];
+  },
+
+  chooseFile: async (options?: { title?: string }) => {
+    const selected = await open({
+      multiple: false,
+      directory: false,
+      title: options?.title
+    });
+    return typeof selected === "string" ? selected : null;
   },
 
   getDesktopPreferences: () => call<DesktopPreferences>("get_desktop_preferences"),

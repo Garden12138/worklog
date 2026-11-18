@@ -35,6 +35,7 @@ import {
   RefreshCw,
   RotateCcw,
   Save,
+  Search,
   Send,
   Settings,
   ShieldCheck,
@@ -59,6 +60,7 @@ import type {
   DesktopPreferences,
   EmailSetting,
   FieldChange,
+  GenerationTaskStatus,
   LlmSetting,
   MigrationResult,
   Priority,
@@ -76,18 +78,20 @@ import type {
   DailyWorkStat,
   WorkReportSummary
 } from "./types";
+import { listen } from "@tauri-apps/api/event";
 import "./styles.css";
 
 type Tab = "logs" | "reports" | "templates" | "settings";
 
 const reportLabels: Record<ReportType, string> = {
+  daily_report: "日报",
   weekly_report: "周报",
   monthly_report: "月报",
   performance_review: "绩效考核表"
 };
 
 const providerLabels: Record<Provider, string> = {
-  xcli: "xcli 本机网关（推理位置取决于上游）",
+  xcli: "xcli v2 本机编排",
   openai: "OpenAI",
   nvidia: "NVIDIA",
   openrouter: "OpenRouter",
@@ -96,7 +100,7 @@ const providerLabels: Record<Provider, string> = {
 };
 
 const providerDefaults: Record<Provider, { base_url: string; model: string; timeout_seconds: number }> = {
-  xcli: { base_url: "http://127.0.0.1:18741/v1", model: "xcli/text-default", timeout_seconds: 180 },
+  xcli: { base_url: "/Users/cengjiada/Documents/github/xcli/bin/xcli", model: "", timeout_seconds: 180 },
   openai: { base_url: "https://api.openai.com/v1", model: "gpt-4.1-mini", timeout_seconds: 60 },
   nvidia: { base_url: "https://integrate.api.nvidia.com/v1", model: "meta/llama-3.1-70b-instruct", timeout_seconds: 180 },
   openrouter: { base_url: "https://openrouter.ai/api/v1", model: "openai/gpt-4.1-mini", timeout_seconds: 60 },
@@ -1179,38 +1183,164 @@ function App() {
   const isGeneratingReport = activeAiTask?.type === "generate_report";
   const [generatingReportTitle, setGeneratingReportTitle] = React.useState<string | null>(null);
   const [selectedReportId, setSelectedReportId] = React.useState<number | null>(null);
+  const [activeGenerationTask, setActiveGenerationTask] = React.useState<GenerationTaskStatus | null>(null);
+  const [isCancellingGeneration, setIsCancellingGeneration] = React.useState(false);
 
+  // Listen for Tauri xcli task events
   React.useEffect(() => {
-    api.listActiveGenerations()
-      .then((actives) => {
-        if (actives && actives.length > 0) {
+    if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
+      return;
+    }
+
+    let unlistenProgress: (() => void) | undefined;
+    let unlistenCompleted: (() => void) | undefined;
+    let unlistenCancelled: (() => void) | undefined;
+    let unlistenFailed: (() => void) | undefined;
+
+    const setupListeners = async () => {
+      unlistenProgress = await listen<{
+        task_id?: string;
+        internal_task_id?: number;
+        step_progress?: string;
+        status?: string;
+      }>("xcli:progress", (event) => {
+        const payload = event.payload;
+        if (payload?.step_progress) {
+          setActiveGenerationTask((prev) =>
+            prev ? { ...prev, step_progress: payload.step_progress ?? prev.step_progress } : prev
+          );
+        }
+      });
+
+      unlistenCompleted = await listen<{
+        internal_task_id?: number;
+        task_id?: number;
+        report_id?: number;
+        title?: string;
+        report?: Report;
+      }>("xcli:completed", async (event) => {
+        const payload = event.payload;
+        setActiveAiTask(null);
+        setActiveGenerationTask(null);
+        setIsCancellingGeneration(false);
+        setGeneratingReportTitle(null);
+        const reportId = payload.report_id ?? payload.report?.id;
+        if (reportId) {
+          setSelectedReportId(reportId);
+        }
+        setNotice(`报告草稿「${payload.title ?? payload.report?.title ?? "新报告"}」已在后台生成完成并已自动选中`);
+        await refresh();
+      });
+
+      unlistenCancelled = await listen<{
+        internal_task_id?: number;
+        xcli_task_id?: string;
+      }>("xcli:cancelled", async () => {
+        setActiveAiTask(null);
+        setActiveGenerationTask(null);
+        setIsCancellingGeneration(false);
+        setGeneratingReportTitle(null);
+        setNotice("报告生成任务已取消");
+        await refresh();
+      });
+
+      unlistenFailed = await listen<{
+        internal_task_id?: number;
+        error?: string;
+      }>("xcli:failed", async (event) => {
+        setActiveAiTask(null);
+        setActiveGenerationTask(null);
+        setIsCancellingGeneration(false);
+        setGeneratingReportTitle(null);
+        setError(event.payload.error || "报告生成失败");
+        await refresh();
+      });
+    };
+
+    void setupListeners();
+
+    return () => {
+      unlistenProgress?.();
+      unlistenCompleted?.();
+      unlistenCancelled?.();
+      unlistenFailed?.();
+    };
+  }, [refresh]);
+
+  // Check and recover active background task on mount
+  React.useEffect(() => {
+    api.getActiveGenerationTask()
+      .then(async (task) => {
+        if (task && (task.status === "running" || task.status === "queued" || task.status === "cancelling")) {
+          setActiveGenerationTask(task);
+          setIsCancellingGeneration(task.status === "cancelling");
+          const typeLabel = reportLabels[task.report_type] || "报告";
+          const title = task.title || `${typeLabel}草稿`;
           setActiveAiTask({
             type: "generate_report",
-            title: "报告后台生成中",
+            title: `生成${title}`,
             tab: "reports"
           });
-          setGeneratingReportTitle("报告生成中");
+          setGeneratingReportTitle(title);
+          try {
+            const recovered = await api.recoverGenerationTask(task.id);
+            if (recovered.status === "completed" && recovered.report_id) {
+              setActiveAiTask(null);
+              setActiveGenerationTask(null);
+              setIsCancellingGeneration(false);
+              setGeneratingReportTitle(null);
+              setSelectedReportId(recovered.report_id);
+              setNotice("未完成的生成任务已恢复并成功生成报告");
+              await refresh();
+            }
+          } catch {
+            // recovery streaming continues in background
+          }
+        } else {
+          api.listActiveGenerations()
+            .then((actives) => {
+              if (actives && actives.length > 0) {
+                setActiveAiTask({
+                  type: "generate_report",
+                  title: "报告后台生成中",
+                  tab: "reports"
+                });
+                setGeneratingReportTitle("报告生成中");
+              }
+            })
+            .catch(() => {});
         }
       })
       .catch(() => {});
-  }, []);
+  }, [refresh]);
 
   React.useEffect(() => {
     if (activeAiTask?.type !== "generate_report") return;
     const interval = setInterval(async () => {
       try {
-        const actives = await api.listActiveGenerations();
-        if (!actives || actives.length === 0) {
-          setActiveAiTask(null);
-          setGeneratingReportTitle(null);
-          await refresh();
+        if (activeGenerationTask) {
+          const task = await api.getActiveGenerationTask();
+          if (!task || task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
+            setActiveAiTask(null);
+            setActiveGenerationTask(null);
+            setIsCancellingGeneration(false);
+            setGeneratingReportTitle(null);
+            await refresh();
+          }
+        } else {
+          const actives = await api.listActiveGenerations();
+          if (!actives || actives.length === 0) {
+            setActiveAiTask(null);
+            setGeneratingReportTitle(null);
+            await refresh();
+          }
         }
       } catch {
         // ignore
       }
     }, 2000);
     return () => clearInterval(interval);
-  }, [activeAiTask?.type, refresh]);
+  }, [activeAiTask?.type, activeGenerationTask, refresh]);
 
   async function handleGenerateReport(payload: {
     report_type: ReportType;
@@ -1236,18 +1366,28 @@ function App() {
     setNotice(`正在后台生成${typeLabel}草稿，您可以切换菜单继续其他操作...`);
 
     try {
-      const res = await api.generateReport(payload);
-      setActiveAiTask(null);
-      setGeneratingReportTitle(null);
-      setSelectedReportId(res.report.id);
-      setNotice(`报告草稿「${res.report.title}」已在后台生成完成并已自动选中`);
-      await refresh();
-      return res.report;
+      const task = await api.startReportGeneration(payload);
+      setActiveGenerationTask(task);
     } catch (err) {
       setActiveAiTask(null);
+      setActiveGenerationTask(null);
       setGeneratingReportTitle(null);
-      setError(err instanceof Error ? err.message : "生成报告草稿失败");
+      setError(err instanceof Error ? err.message : "启动报告生成失败");
       throw err;
+    }
+  }
+
+  async function handleCancelGeneration() {
+    if (!activeGenerationTask || isCancellingGeneration) {
+      return;
+    }
+    setIsCancellingGeneration(true);
+    setNotice("正在取消报告生成任务，请稍候...");
+    try {
+      await api.cancelGenerationTask(activeGenerationTask.id);
+    } catch (err) {
+      setIsCancellingGeneration(false);
+      setError(err instanceof Error ? err.message : "取消任务失败");
     }
   }
 
@@ -1474,6 +1614,9 @@ function App() {
               onSelectId={setSelectedReportId}
               isGenerating={isGeneratingReport}
               generatingTitle={generatingReportTitle}
+              stepProgress={activeGenerationTask?.step_progress}
+              isCancelling={isCancellingGeneration}
+              onCancelGeneration={activeGenerationTask ? handleCancelGeneration : undefined}
               onGenerate={handleGenerateReport}
               onOptimize={async (id, payload) => {
                 if (activeAiTask) {
@@ -2785,6 +2928,156 @@ function dateRangeLabel(item: WorkLog) {
   return item.start_date === item.end_date ? `${item.start_date} · 当天事项` : `${item.start_date} 至 ${item.end_date}`;
 }
 
+function RecipientMultiSelect(props: {
+  recipients: Recipient[];
+  selectedIds: number[];
+  onChange: (ids: number[]) => void;
+  placeholder?: string;
+  disabled?: boolean;
+}) {
+  const [isOpen, setIsOpen] = React.useState(false);
+  const [search, setSearch] = React.useState("");
+  const containerRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    }
+    if (isOpen) {
+      document.addEventListener("mousedown", handleClickOutside);
+      return () => document.removeEventListener("mousedown", handleClickOutside);
+    }
+  }, [isOpen]);
+
+  const filtered = props.recipients.filter((r) => {
+    if (!search.trim()) return true;
+    const q = search.toLowerCase();
+    return r.name.toLowerCase().includes(q) || r.email.toLowerCase().includes(q);
+  });
+
+  const selectedRecipients = props.recipients.filter((r) => props.selectedIds.includes(r.id));
+
+  function toggle(id: number) {
+    if (props.selectedIds.includes(id)) {
+      props.onChange(props.selectedIds.filter((item) => item !== id));
+    } else {
+      props.onChange([...props.selectedIds, id]);
+    }
+  }
+
+  function selectAll() {
+    props.onChange(props.recipients.map((r) => r.id));
+  }
+
+  function clearAll() {
+    props.onChange([]);
+  }
+
+  return (
+    <div className="multi-select-container" ref={containerRef}>
+      <button
+        type="button"
+        className={`multi-select-trigger ${isOpen ? "active" : ""}`}
+        disabled={props.disabled}
+        onClick={() => setIsOpen((prev) => !prev)}
+      >
+        <div className="multi-select-trigger-content">
+          <Users size={15} className="multi-select-icon" />
+          {selectedRecipients.length === 0 ? (
+            <span className="multi-select-placeholder">{props.placeholder || "请选择收件人..."}</span>
+          ) : selectedRecipients.length <= 2 ? (
+            <div className="multi-select-tags">
+              {selectedRecipients.map((r) => (
+                <span className="multi-select-pill" key={r.id}>
+                  {r.name}
+                  <button
+                    type="button"
+                    className="multi-select-pill-remove"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggle(r.id);
+                    }}
+                  >
+                    <X size={11} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : (
+            <span className="multi-select-summary">
+              已选 <strong>{selectedRecipients.length}</strong> 位收件人
+              <small>（{selectedRecipients.slice(0, 2).map((r) => r.name).join("、")}等）</small>
+            </span>
+          )}
+        </div>
+        <ChevronDown size={14} className={`multi-select-arrow ${isOpen ? "open" : ""}`} />
+      </button>
+
+      {isOpen && (
+        <div className="multi-select-popover">
+          <div className="multi-select-search-row">
+            <Search size={14} className="search-icon" />
+            <input
+              type="text"
+              autoFocus
+              placeholder="搜索收件人姓名或邮箱..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+            {search && (
+              <button type="button" className="clear-search" onClick={() => setSearch("")}>
+                <X size={12} />
+              </button>
+            )}
+          </div>
+
+          <div className="multi-select-actions-bar">
+            <span>已选 {props.selectedIds.length} / {props.recipients.length} 位</span>
+            <div className="multi-select-quick-actions">
+              <button type="button" onClick={selectAll} disabled={props.recipients.length === 0}>
+                全选
+              </button>
+              <button type="button" onClick={clearAll} disabled={props.selectedIds.length === 0}>
+                清空
+              </button>
+            </div>
+          </div>
+
+          <div className="multi-select-list">
+            {filtered.length === 0 ? (
+              <p className="multi-select-empty">
+                {props.recipients.length === 0 ? "通讯录暂无收件人，可在系统设置中添加" : "未找到匹配的收件人"}
+              </p>
+            ) : (
+              filtered.map((r) => {
+                const checked = props.selectedIds.includes(r.id);
+                return (
+                  <label className={`multi-select-item ${checked ? "selected" : ""}`} key={r.id}>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggle(r.id)}
+                    />
+                    <div className="multi-select-item-info">
+                      <span className="recipient-name">
+                        {r.name}
+                        {r.is_default && <span className="default-pill">默认</span>}
+                      </span>
+                      <small className="recipient-email">{r.email}</small>
+                    </div>
+                  </label>
+                );
+              })
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ReportsPage(props: {
   reports: Report[];
   templates: Template[];
@@ -2793,6 +3086,9 @@ function ReportsPage(props: {
   onSelectId?: (id: number | null) => void;
   isGenerating?: boolean;
   generatingTitle?: string | null;
+  stepProgress?: string | null;
+  isCancelling?: boolean;
+  onCancelGeneration?: () => void;
   onGenerate: (payload: {
     report_type: ReportType;
     anchor_date?: string;
@@ -3081,8 +3377,23 @@ function ReportsPage(props: {
 
       {isGenerating && (
         <div className="report-generating-banner">
-          <LoaderCircle className="spin" size={16} />
-          <span>正在后台生成{props.generatingTitle || "报告草稿"}，您可以自由切换到其他页面操作，生成完成后将自动通知并展示...</span>
+          <div className="report-generating-content">
+            <LoaderCircle className="spin" size={16} />
+            <span>
+              正在后台生成{props.generatingTitle || "报告草稿"}
+              {props.stepProgress ? `（${props.stepProgress}）` : ""}，您可以自由切换到其他页面操作，生成完成后将自动通知并展示...
+            </span>
+          </div>
+          {props.onCancelGeneration && (
+            <button
+              type="button"
+              className="report-generating-cancel"
+              disabled={props.isCancelling}
+              onClick={props.onCancelGeneration}
+            >
+              {props.isCancelling ? "正在取消..." : "取消生成"}
+            </button>
+          )}
         </div>
       )}
 
@@ -3340,27 +3651,13 @@ function ReportsPage(props: {
                   {selectedRecipientIds.length ? `已选择 ${selectedRecipientIds.length} 位` : "尚未选择"}
                 </em>
               </div>
-              {props.recipients.length === 0 ? (
-                <p className="form-hint">通讯录暂无收件人，可在系统设置中添加，或直接填写下方临时邮箱。</p>
-              ) : (
-                <div className="recipient-options">
-                  {props.recipients.map((recipient) => (
-                    <label className="recipient-option" key={recipient.id}>
-                      <input
-                        type="checkbox"
-                        checked={selectedRecipientIds.includes(recipient.id)}
-                        disabled={isSendingEmail}
-                        onChange={() => toggleRecipient(recipient.id)}
-                      />
-                      <span>
-                        <strong>{recipient.name}</strong>
-                        <small>{recipient.email}</small>
-                      </span>
-                      {recipient.is_default && <em>默认</em>}
-                    </label>
-                  ))}
-                </div>
-              )}
+              <RecipientMultiSelect
+                recipients={props.recipients}
+                selectedIds={selectedRecipientIds}
+                onChange={setSelectedRecipientIds}
+                placeholder="选择通讯录收件人..."
+                disabled={isSendingEmail}
+              />
             </div>
             <label>
               临时邮箱
@@ -4566,6 +4863,312 @@ function TemplatesPage(props: {
   );
 }
 
+function LlmSettingModal(props: {
+  isOpen: boolean;
+  onClose: () => void;
+  setting: LlmSetting | null;
+  onSave: (payload: LlmSetting) => Promise<void>;
+  onCheckGateway?: (id?: number) => Promise<string>;
+}) {
+  if (!props.isOpen) return null;
+
+  const isEditing = Boolean(props.setting && props.setting.id);
+  const [form, setForm] = React.useState<LlmSetting>(() => {
+    if (props.setting) {
+      return { ...props.setting, api_key: "" };
+    }
+    const defaultProvider: Provider = "xcli";
+    return {
+      provider: defaultProvider,
+      base_url: providerDefaults[defaultProvider].base_url,
+      model: providerDefaults[defaultProvider].model,
+      api_key: "",
+      extra_headers: {},
+      timeout_seconds: providerDefaults[defaultProvider].timeout_seconds,
+    };
+  });
+
+  const [headersText, setHeadersText] = React.useState(() =>
+    JSON.stringify(props.setting?.extra_headers ?? {}, null, 2)
+  );
+  const [headersError, setHeadersError] = React.useState("");
+  const [gatewayStatus, setGatewayStatus] = React.useState("");
+  const [gatewayChecking, setGatewayChecking] = React.useState(false);
+  const [isSaving, setIsSaving] = React.useState(false);
+  const [error, setError] = React.useState("");
+
+  const apiKeyPlaceholder = props.setting?.api_key
+    ? `当前：${props.setting.api_key}`
+    : form.provider === "xcli"
+    ? "xcli 本机通过命令行交互，无需填写 API Key"
+    : "首次配置请输入 API Key；留空将尝试复用已有密钥";
+
+  function handleProviderChange(newProvider: Provider) {
+    setGatewayStatus("");
+    setError("");
+    const extra_headers: Record<string, string> = {};
+    setForm((prev) => ({
+      ...prev,
+      provider: newProvider,
+      base_url: providerDefaults[newProvider].base_url,
+      model: providerDefaults[newProvider].model,
+      api_key: "",
+      extra_headers,
+      timeout_seconds: providerDefaults[newProvider].timeout_seconds,
+    }));
+    setHeadersText(JSON.stringify(extra_headers, null, 2));
+    setHeadersError("");
+  }
+
+  async function handleSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    setError("");
+    setIsSaving(true);
+    let extra_headers: Record<string, string> = {};
+    try {
+      if (headersText.trim()) {
+        const parsed: unknown = JSON.parse(headersText);
+        if (
+          !parsed ||
+          Array.isArray(parsed) ||
+          typeof parsed !== "object" ||
+          Object.values(parsed).some((value) => typeof value !== "string")
+        ) {
+          throw new Error("扩展请求头必须是一个键和值均为文本的 JSON 对象。");
+        }
+        extra_headers = parsed as Record<string, string>;
+      }
+    } catch (err) {
+      setHeadersError(err instanceof Error ? err.message : "扩展请求头格式无效。");
+      setIsSaving(false);
+      return;
+    }
+
+    try {
+      await props.onSave({ ...form, extra_headers });
+      props.onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "保存配置失败");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleCheckGateway() {
+    if (!props.setting?.id || gatewayChecking) return;
+    setGatewayChecking(true);
+    setGatewayStatus("");
+    try {
+      if (props.onCheckGateway) {
+        const status = await props.onCheckGateway(props.setting.id);
+        setGatewayStatus(status);
+      } else {
+        const result = await api.testXcliConnection(props.setting.id);
+        if (result.agents && result.agents.length > 0) {
+          const agentDetails = result.agents
+            .map((a) => `${a.name} (${a.auth === "unknown" ? "已安装/未知认证(可直接提交)" : a.auth === "authenticated" ? "已认证" : a.auth})`)
+            .join("，");
+          setGatewayStatus(`xcli 环境检测正常。可用 Agent：${agentDetails}。当前路由：${result.model || "默认自动选择"}（${result.inference_location === "local" ? "本机推理" : "外部/云端"}）。未发起模型推理调用。`);
+        } else {
+          setGatewayStatus(`已保存配置可连接：${result.model || "默认路由"}；未调用模型。`);
+        }
+      }
+    } catch (err) {
+      setGatewayStatus(typeof err === "string" ? err : err instanceof Error ? err.message : "检查环境失败");
+    } finally {
+      setGatewayChecking(false);
+    }
+  }
+
+  return (
+    <div className="settings-modal-backdrop" onClick={props.onClose}>
+      <div
+        className="settings-modal-dialog llm-setting-modal"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="llm-modal-title"
+      >
+        <div className="settings-modal-header">
+          <div className="modal-title-group">
+            <div className="modal-icon-badge">
+              <Cpu size={20} />
+            </div>
+            <div>
+              <h2 id="llm-modal-title">{isEditing ? "编辑 LLM 配置" : "新增 LLM 配置"}</h2>
+              <p>
+                {isEditing
+                  ? `修改已保存的 ${providerLabels[form.provider]} 配置`
+                  : "添加新的大语言模型服务商或本机 xcli 编排"}
+              </p>
+            </div>
+          </div>
+          <button type="button" className="modal-close-btn" onClick={props.onClose} aria-label="关闭">
+            <X size={18} />
+          </button>
+        </div>
+
+        <form onSubmit={(e) => void handleSubmit(e)}>
+          <div className="settings-modal-body">
+            {error && <div className="error" role="alert"><CircleAlert size={16} />{error}</div>}
+
+            <div className="settings-form-grid">
+              <label className="field-group">
+                <span className="field-label">服务提供商 (Provider)</span>
+                <select
+                  value={form.provider}
+                  onChange={(e) => handleProviderChange(e.target.value as Provider)}
+                >
+                  <option value="xcli">xcli v2 本机编排（推荐）</option>
+                  <option value="openai">OpenAI</option>
+                  <option value="nvidia">NVIDIA</option>
+                  <option value="openrouter">OpenRouter</option>
+                  <option value="minimax">MiniMax（国内）</option>
+                  <option value="bailian">阿里云百炼（国内）</option>
+                </select>
+                <small className="field-hint">
+                  {form.provider === "xcli"
+                    ? "本机命令行交互与任务编排引擎，支持 Codex/Antigravity 等多种 Agent 自动路由切换"
+                    : "标准 OpenAI 兼容接口服务"}
+                </small>
+              </label>
+
+              <label className="field-group">
+                <span className="field-label">
+                  {form.provider === "xcli" ? "Agent / 路由指定（留空自动择优）" : "模型名称 (Model)"}
+                </span>
+                <input
+                  value={form.model}
+                  placeholder={form.provider === "xcli" ? "留空自动择优，或指定 codex、antigravity 等" : "例如 gpt-4.1-mini"}
+                  onChange={(e) => setForm({ ...form, model: e.target.value })}
+                />
+                <small className="field-hint">
+                  {form.provider === "xcli" ? "推荐留空，由 xcli 自动择优并支持自动降级" : "服务商的模型标识符"}
+                </small>
+              </label>
+
+              <label className="field-group full-width">
+                <span className="field-label">
+                  {form.provider === "xcli" ? "xcli 可执行文件路径 (CLI Path)" : "接口服务地址 (Base URL)"}
+                </span>
+                {form.provider === "xcli" ? (
+                  <div className="input-with-button">
+                    <input
+                      value={form.base_url}
+                      placeholder="/Users/cengjiada/Documents/github/xcli/bin/xcli 或系统 xcli"
+                      onChange={(e) => setForm({ ...form, base_url: e.target.value })}
+                    />
+                    <button
+                      className="secondary"
+                      type="button"
+                      onClick={async () => {
+                        const path = await api.chooseFile({ title: "选择 xcli 可执行文件" });
+                        if (path) {
+                          setForm((prev) => ({ ...prev, base_url: path }));
+                        }
+                      }}
+                    >
+                      选择文件
+                    </button>
+                  </div>
+                ) : (
+                  <input
+                    value={form.base_url}
+                    placeholder="https://api.openai.com/v1"
+                    onChange={(e) => setForm({ ...form, base_url: e.target.value })}
+                  />
+                )}
+                <small className="field-hint">
+                  {form.provider === "xcli"
+                    ? "本机 xcli 二进制可执行文件绝对路径"
+                    : "兼容 OpenAI /v1 规范的 API 端点"}
+                </small>
+              </label>
+
+              <label className="field-group">
+                <span className="field-label">请求超时（秒）</span>
+                <input
+                  type="number"
+                  min={5}
+                  max={600}
+                  step={5}
+                  required
+                  value={form.timeout_seconds}
+                  onChange={(e) => setForm({ ...form, timeout_seconds: Number(e.target.value) })}
+                />
+              </label>
+
+              <label className="field-group full-width">
+                <span className="field-label">
+                  {form.provider === "xcli" ? "API Key（xcli 本机使用无需填写）" : "API Key 密钥"}
+                </span>
+                <input
+                  type="password"
+                  placeholder={apiKeyPlaceholder}
+                  value={form.api_key ?? ""}
+                  onChange={(e) => setForm({ ...form, api_key: e.target.value })}
+                />
+                <small className="field-hint">
+                  {form.provider === "xcli"
+                    ? "xcli 在本机运行，鉴权由 xcli 或本地 Agent 环境自管"
+                    : "密钥安全存储于本地安全库；留空将复用当前保存的密钥"}
+                </small>
+              </label>
+
+              <label className="field-group full-width">
+                <span className="field-label">自定义请求头 (Extra Headers JSON)</span>
+                <textarea
+                  className="code-textarea"
+                  rows={3}
+                  value={headersText}
+                  onChange={(e) => {
+                    setHeadersText(e.target.value);
+                    setHeadersError("");
+                  }}
+                  placeholder="{}"
+                />
+                {headersError && <p className="field-error">{headersError}</p>}
+                <small className="field-hint">可选。若需指定额外的 HTTP Headers，请填写合法 JSON 键值对</small>
+              </label>
+
+              {form.provider === "xcli" && isEditing && (
+                <div className="xcli-check-card full-width">
+                  <div className="xcli-check-row">
+                    <div>
+                      <strong>xcli 环境检测</strong>
+                      <p>检查本机 xcli 可执行文件及各 Agent（Codex/Antigravity）就绪状态。</p>
+                    </div>
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={gatewayChecking}
+                      onClick={() => void handleCheckGateway()}
+                    >
+                      {gatewayChecking ? <LoaderCircle className="spin" size={14} /> : <CheckCircle2 size={14} />}
+                      {gatewayChecking ? "正在检查..." : "立即检查环境"}
+                    </button>
+                  </div>
+                  {gatewayStatus && <div className="xcli-status-output">{gatewayStatus}</div>}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="settings-modal-footer">
+            <button type="button" className="secondary" onClick={props.onClose} disabled={isSaving}>
+              取消
+            </button>
+            <button type="submit" className="primary" disabled={isSaving}>
+              {isSaving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}
+              {isSaving ? "正在保存..." : isEditing ? "保存并应用配置" : "保存并应用新配置"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 function SettingsPage(props: {
   setting: LlmSetting | null;
   settings: LlmSetting[];
@@ -4612,112 +5215,34 @@ function SettingsPage(props: {
   onImportLegacy: () => Promise<void>;
 }) {
   const [activeSubTab, setActiveSubTab] = React.useState<"llm" | "capture" | "schedules" | "recipients" | "desktop">("llm");
-  const [form, setForm] = React.useState<LlmSetting>({
-    provider: "openai",
-    base_url: providerDefaults.openai.base_url,
-    model: providerDefaults.openai.model,
-    api_key: "",
-    extra_headers: {},
-    timeout_seconds: providerDefaults.openai.timeout_seconds
-  });
-  const [headersText, setHeadersText] = React.useState("{}");
-  const [headersError, setHeadersError] = React.useState("");
+  const [llmModalOpen, setLlmModalOpen] = React.useState(false);
+  const [editingLlmSetting, setEditingLlmSetting] = React.useState<LlmSetting | null>(null);
   const [gatewayStatus, setGatewayStatus] = React.useState("");
   const [gatewayChecking, setGatewayChecking] = React.useState(false);
-  const activeProviderLabel = props.setting ? providerLabels[props.setting.provider] : "未配置";
-  const formSetting = props.settings.find((item) => item.id === form.id);
-  const apiKeyPlaceholder = formSetting?.api_key
-    ? `当前：${formSetting.api_key}`
-    : props.setting?.api_key
-      ? `当前：${props.setting.api_key}`
-      : "";
 
-  React.useEffect(() => {
-    if (props.setting) {
-      setForm({ ...props.setting, api_key: "" });
-      setHeadersText(JSON.stringify(props.setting.extra_headers ?? {}, null, 2));
-    }
-  }, [
-    props.setting?.id,
-    props.setting?.provider,
-    props.setting?.base_url,
-    props.setting?.model,
-    props.setting?.api_key,
-    props.setting?.timeout_seconds,
-    props.setting?.updated_at
-  ]);
-
-  function loadSavedSetting(setting: LlmSetting) {
-    setGatewayStatus("");
-    setForm({ ...setting, api_key: "" });
-    setHeadersText(JSON.stringify(setting.extra_headers ?? {}, null, 2));
-    setHeadersError("");
-  }
-
-  function setProvider(provider: Provider) {
-    setGatewayStatus("");
-    const extra_headers: Record<string, string> = {};
-    setForm((current) => ({
-      ...current,
-      id: undefined,
-      is_active: undefined,
-      created_at: undefined,
-      updated_at: undefined,
-      provider,
-      base_url: providerDefaults[provider].base_url,
-      model: providerDefaults[provider].model,
-      api_key: "",
-      extra_headers,
-      timeout_seconds: providerDefaults[provider].timeout_seconds
-    }));
-    setHeadersText(JSON.stringify(extra_headers, null, 2));
-    setHeadersError("");
-  }
-
-  function startNewSetting() {
-    const provider = props.setting?.provider ?? "openai";
-    const extra_headers: Record<string, string> = {};
-    setForm({
-      provider,
-      base_url: providerDefaults[provider].base_url,
-      model: providerDefaults[provider].model,
-      api_key: "",
-      extra_headers,
-      timeout_seconds: providerDefaults[provider].timeout_seconds
-    });
-    setHeadersText(JSON.stringify(extra_headers, null, 2));
-    setHeadersError("");
-  }
-
-  async function save(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    let extra_headers: Record<string, string> = {};
-    try {
-      if (headersText.trim()) {
-        const parsed: unknown = JSON.parse(headersText);
-        if (!parsed || Array.isArray(parsed) || typeof parsed !== "object" || Object.values(parsed).some((value) => typeof value !== "string")) {
-          throw new Error("扩展请求头必须是一个键和值均为文本的 JSON 对象。");
-        }
-        extra_headers = parsed as Record<string, string>;
-      }
-    } catch (error) {
-      setHeadersError(error instanceof Error ? error.message : "扩展请求头格式无效。");
-      return;
-    }
-    setHeadersError("");
-    await props.onSave({ ...form, extra_headers });
-  }
-
-  async function checkGateway() {
-    if (!form.id || gatewayChecking) return;
+  async function checkGateway(id?: number): Promise<string> {
+    const targetId = id ?? props.setting?.id;
+    if (!targetId || gatewayChecking) return "";
     setGatewayChecking(true);
     setGatewayStatus("");
     try {
-      const result = await api.testXcliConnection(form.id);
-      const location = { local: "本机推理", remote: "转发云端", unknown: "推理位置未知，按云端处理" }[result.inference_location];
-      setGatewayStatus(`已保存配置可连接：${result.model}；${location}。未调用模型。`);
+      const result = await api.testXcliConnection(targetId);
+      let statusStr = "";
+      if (result.agents && result.agents.length > 0) {
+        const agentDetails = result.agents
+          .map((a) => `${a.name} (${a.auth === "unknown" ? "已安装/未知认证(可直接提交)" : a.auth === "authenticated" ? "已认证" : a.auth})`)
+          .join("，");
+        statusStr = `xcli 环境检测正常。可用 Agent：${agentDetails}。当前路由：${result.model || "默认自动选择"}（${result.inference_location === "local" ? "本机推理" : "外部/云端"}）。未发起模型推理调用。`;
+      } else {
+        const location = { local: "本机推理", remote: "转发云端", unknown: "推理位置未知" }[result.inference_location] || result.inference_location;
+        statusStr = `已保存配置可连接：${result.model || "默认路由"}；${location}。未调用模型。`;
+      }
+      setGatewayStatus(statusStr);
+      return statusStr;
     } catch (error) {
-      setGatewayStatus(typeof error === "string" ? error : error instanceof Error ? error.message : "网关检查失败");
+      const msg = typeof error === "string" ? error : error instanceof Error ? error.message : "xcli 环境检查失败";
+      setGatewayStatus(msg);
+      return msg;
     } finally {
       setGatewayChecking(false);
     }
@@ -4727,14 +5252,11 @@ function SettingsPage(props: {
     if (!setting.id || setting.is_active) {
       return;
     }
-    const label = `${providerLabels[setting.provider]} / ${setting.model}`;
+    const label = `${providerLabels[setting.provider]} / ${setting.model || "默认"}`;
     if (!window.confirm(`删除 LLM 配置「${label}」？`)) {
       return;
     }
     await props.onDeleteLlmSetting(setting.id);
-    if (form.id === setting.id && props.setting) {
-      loadSavedSetting(props.setting);
-    }
   }
 
   return (
@@ -4786,179 +5308,219 @@ function SettingsPage(props: {
         {activeSubTab === "desktop" && (
           <section className="panel settings-panel desktop-settings-panel">
             <div className="settings-intro">
-              <p className="section-eyebrow">桌面应用</p>
-              <h2>本地运行</h2>
-              <p>关闭主窗口后 Worklog 会留在系统托盘，定时报告仍会继续执行。</p>
+              <div>
+                <p className="section-eyebrow">桌面应用</p>
+                <h2>偏好与系统设置</h2>
+                <p>关闭主窗口后 Worklog 会留在系统托盘后台运行，定时报告与采集仍会按时触发。</p>
+              </div>
               <div className="settings-side-note">
-                <span>数据库位置</span>
+                <span>数据库存储位置</span>
                 <strong className="path-value">{props.desktopPreferences?.database_path ?? "正在读取"}</strong>
                 <p>{props.migrationResult?.imported ? `已从 ${props.migrationResult.source_path ?? "旧版本"} 自动迁移` : "数据保存在操作系统应用数据目录。"}</p>
               </div>
             </div>
-            <div className="settings-section">
-              <label className="toggle">
-                <input
-                  type="checkbox"
-                  checked={Boolean(props.desktopPreferences?.launch_at_login)}
-                  onChange={(event) => void props.onSetLaunchAtLogin(event.target.checked)}
-                />
-                登录电脑后自动启动 Worklog
-              </label>
-              <p className="form-hint">未自动发现旧版数据时，可手动选择原来的 worklog.db；已有新数据后将禁止覆盖导入。</p>
-              <button className="secondary" type="button" onClick={() => void props.onImportLegacy()}>
-                <Download size={16} />
-                导入旧版数据库
-              </button>
+            <div className="desktop-settings-grid">
+              <div className="desktop-card">
+                <div className="desktop-card-header">
+                  <h3>开机启动</h3>
+                  <p>管理 Worklog 随操作系统开机自启动的行为。</p>
+                </div>
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(props.desktopPreferences?.launch_at_login)}
+                    onChange={(event) => void props.onSetLaunchAtLogin(event.target.checked)}
+                  />
+                  <span>登录电脑后自动启动 Worklog</span>
+                </label>
+                <p className="field-hint">开启后，系统开机将自动在后台就绪，确保定时报告与活动采集正常工作。</p>
+              </div>
+
+              <div className="desktop-card">
+                <div className="desktop-card-header">
+                  <h3>历史数据导入与迁移</h3>
+                  <p>如未自动发现旧版数据，可手动选择原来的 worklog.db 进行合并迁移。</p>
+                </div>
+                <p className="field-hint">注意：仅支持导入尚未被覆盖写入的新库；已有新数据后将禁止覆盖导入。</p>
+                <div>
+                  <button className="secondary" type="button" onClick={() => void props.onImportLegacy()}>
+                    <Download size={15} />
+                    导入旧版数据库
+                  </button>
+                </div>
+              </div>
             </div>
           </section>
         )}
 
         {activeSubTab === "llm" && (
-          <form className="panel settings-panel" onSubmit={(event) => void save(event)}>
-            <div className="settings-intro">
-              <p className="section-eyebrow">本地配置</p>
-              <h2>LLM 设置</h2>
-              <p>配置一个兼容 OpenAI API 的服务，用于生成报告和从示例提炼模板。</p>
-              <div className="settings-side-note">
-                <span>当前应用</span>
-                <strong>{activeProviderLabel}{props.setting ? ` / ${props.setting.model}` : ""}</strong>
-                <p>保存并应用后，报告生成和模板提炼会立即使用这一组配置。各 Provider 的密钥独立保留。</p>
+          <div className="panel settings-panel llm-settings-view">
+            <div className="settings-panel-header">
+              <div>
+                <p className="section-eyebrow">本地配置</p>
+                <h2>AI 模型与编排设置</h2>
+                <p>配置用于生成报告、从示例提炼模板和 AI 优化的模型服务；支持 xcli 本机编排与主流云端 API。</p>
+              </div>
+              <div className="panel-header-actions">
+                <span className="count-badge">{props.settings.length} 个配置</span>
+                <button
+                  className="primary"
+                  type="button"
+                  onClick={() => {
+                    setEditingLlmSetting(null);
+                    setLlmModalOpen(true);
+                  }}
+                >
+                  <Plus size={16} />
+                  新增配置
+                </button>
               </div>
             </div>
 
-            <section className="settings-section saved-llm-section">
+            {/* Current Active Hero Card */}
+            {props.setting ? (
+              <div className="llm-hero-card">
+                <div className="llm-hero-top">
+                  <div>
+                    <div className="llm-hero-badge-row">
+                      <span className="provider-tag">{providerLabels[props.setting.provider] || props.setting.provider}</span>
+                      <span className="active-status-badge">
+                        <span className="status-indicator-dot online" />
+                        当前生效使用中
+                      </span>
+                    </div>
+                    <h3 className="llm-hero-title">
+                      {props.setting.provider === "xcli"
+                        ? props.setting.model ? `指定 Agent: ${props.setting.model}` : "xcli v2 默认自动择优路由"
+                        : props.setting.model || "默认模型"}
+                    </h3>
+                  </div>
+                  <div className="llm-hero-actions">
+                    {props.setting.provider === "xcli" && (
+                      <button
+                        className="secondary"
+                        type="button"
+                        disabled={gatewayChecking}
+                        onClick={() => void checkGateway(props.setting?.id)}
+                      >
+                        {gatewayChecking ? <LoaderCircle className="spin" size={15} /> : <CheckCircle2 size={15} />}
+                        {gatewayChecking ? "检查中..." : "环境检查"}
+                      </button>
+                    )}
+                    <button
+                      className="primary"
+                      type="button"
+                      onClick={() => {
+                        setEditingLlmSetting(props.setting);
+                        setLlmModalOpen(true);
+                      }}
+                    >
+                      <Pencil size={15} />
+                      编辑配置
+                    </button>
+                  </div>
+                </div>
+
+                <div className="llm-hero-meta">
+                  <span>
+                    <strong>{props.setting.provider === "xcli" ? "CLI 路径：" : "Base URL："}</strong>
+                    <code>{props.setting.base_url}</code>
+                  </span>
+                  <span><strong>超时时间：</strong>{props.setting.timeout_seconds} 秒</span>
+                  <span>
+                    <strong>密钥：</strong>
+                    {props.setting.provider === "xcli"
+                      ? "本机交互免密钥"
+                      : props.setting.api_key
+                      ? `已保存 (${props.setting.api_key})`
+                      : "未保存密钥"}
+                  </span>
+                </div>
+
+                {gatewayStatus && (
+                  <div className="llm-hero-status-box">
+                    <p>{gatewayStatus}</p>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="empty-hint">尚未配置生效的 AI 模型，请点击上方「新增配置」添加。</div>
+            )}
+
+            {/* Saved Configurations List */}
+            <section className="saved-llm-section">
               <div className="saved-llm-header">
                 <div>
-                  <h3>已保存 LLM 配置</h3>
-                  <p>这些配置会保留在本地；点击“应用”后，生成报告和模板会使用对应配置。</p>
-                </div>
-                <div className="saved-llm-header-actions">
-                  <span className="count-badge">{props.settings.length} 个</span>
-                  <button className="secondary" type="button" onClick={startNewSetting}>
-                    <Plus size={16} />
-                    新增配置
-                  </button>
+                  <h3>已保存的 LLM 配置</h3>
+                  <p>点击「应用」即可随时一键切换当前使用的模型服务；点击「编辑」可修改参数（弹窗编辑）。</p>
                 </div>
               </div>
-              {props.settings.length ? (
-                <div className="saved-llm-list">
-                  {props.settings.map((item) => (
-                    <div className={item.is_active ? "saved-llm-item active" : "saved-llm-item"} key={item.id}>
-                      <button className="saved-llm-main" type="button" onClick={() => loadSavedSetting(item)}>
-                        <strong>{providerLabels[item.provider]} / {item.model}</strong>
-                        <span>{item.base_url}</span>
-                        <small>{item.api_key ? `Key ${item.api_key}` : "未保存 API Key"}</small>
-                        <small>请求超时 {item.timeout_seconds} 秒</small>
-                      </button>
-                      <div className="saved-llm-actions">
-                        {item.is_active && <span className="status-badge">当前应用</span>}
-                        <button className="secondary" type="button" onClick={() => loadSavedSetting(item)}>
+
+              <div className="saved-llm-cards-grid">
+                {props.settings.map((item) => {
+                  const isActive = Boolean(item.is_active);
+                  return (
+                    <div className={`saved-llm-card ${isActive ? "is-active" : ""}`} key={item.id}>
+                      <div className="saved-llm-card-top">
+                        <div className="saved-llm-card-title-group">
+                          <span className="provider-tag">{providerLabels[item.provider] || item.provider}</span>
+                          <strong>{item.model || (item.provider === "xcli" ? "自动路由" : "默认")}</strong>
+                        </div>
+                        {isActive && <span className="active-pill">当前生效</span>}
+                      </div>
+
+                      <div className="saved-llm-card-body">
+                        <span className="path-text" title={item.base_url}>{item.base_url}</span>
+                        <div className="meta-row">
+                          <small>{item.provider === "xcli" ? "本机命令行交互" : item.api_key ? `Key ${item.api_key}` : "未配置 Key"}</small>
+                          <small>超时 {item.timeout_seconds}s</small>
+                        </div>
+                      </div>
+
+                      <div className="saved-llm-card-actions">
+                        <button
+                          className="secondary"
+                          type="button"
+                          onClick={() => {
+                            setEditingLlmSetting(item);
+                            setLlmModalOpen(true);
+                          }}
+                        >
+                          <Pencil size={14} />
                           编辑
                         </button>
                         <button
-                          className="primary"
+                          className={isActive ? "secondary" : "primary"}
                           type="button"
-                          disabled={Boolean(item.is_active) || !item.id}
+                          disabled={isActive || !item.id}
                           onClick={() => item.id && void props.onApplyLlmSetting(item.id)}
                         >
-                          应用
+                          {isActive ? "应用中" : "应用"}
                         </button>
                         <button
                           className="icon-button danger"
                           type="button"
-                          disabled={Boolean(item.is_active) || !item.id}
-                          title={item.is_active ? "当前应用的配置不能删除，请先应用其他配置" : "删除配置"}
-                          aria-label={`删除 ${providerLabels[item.provider]} ${item.model} 配置`}
+                          disabled={isActive || !item.id}
+                          title={isActive ? "当前生效的配置不能删除" : "删除配置"}
                           onClick={() => void removeSavedSetting(item)}
                         >
-                          <Trash2 size={16} />
+                          <Trash2 size={15} />
                         </button>
                       </div>
                     </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="empty-hint">还没有保存过 LLM 配置。</p>
-              )}
+                  );
+                })}
+              </div>
             </section>
 
-            <fieldset className="settings-section">
-              <legend>模型服务</legend>
-              <p>切换服务商会自动填入推荐的 Base URL 与模型名称，你仍可按实际环境调整。</p>
-              <div className="settings-grid">
-                <label>
-                  Provider
-                  <select value={form.provider} onChange={(event) => setProvider(event.target.value as Provider)}>
-                    <option value="openai">OpenAI</option>
-                    <option value="xcli">xcli 本机网关</option>
-                    <option value="nvidia">NVIDIA</option>
-                    <option value="openrouter">OpenRouter</option>
-                    <option value="minimax">MiniMax（国内）</option>
-                    <option value="bailian">阿里云百炼（国内）</option>
-                  </select>
-                </label>
-                <label>
-                  Model
-                  <input value={form.model} onChange={(event) => setForm({ ...form, model: event.target.value })} />
-                </label>
-                <label className="full">
-                  Base URL
-                  <input value={form.base_url} onChange={(event) => setForm({ ...form, base_url: event.target.value })} />
-                </label>
-                <label>
-                  请求超时（秒）
-                  <input
-                    type="number"
-                    min={5}
-                    max={600}
-                    step={5}
-                    required
-                    value={form.timeout_seconds}
-                    onChange={(event) => setForm({ ...form, timeout_seconds: Number(event.target.value) })}
-                  />
-                </label>
-              </div>
-            </fieldset>
-
-            <fieldset className="settings-section">
-              <legend>认证与扩展</legend>
-              <p>API Key 仅在填写新值时更新；保留为空可继续使用当前已保存的密钥。</p>
-              <p>切换 Provider 后留空 API Key 时，只会复用该 Provider 之前保存过的密钥。</p>
-              <div className="settings-grid">
-                <label className="full">
-                  API Key
-                  <input
-                    type="password"
-                    placeholder={apiKeyPlaceholder}
-                    value={form.api_key ?? ""}
-                    onChange={(event) => setForm({ ...form, api_key: event.target.value })}
-                  />
-                </label>
-                <label className="full">
-                  Extra Headers JSON
-                  <textarea
-                    aria-describedby={headersError ? "headers-error" : undefined}
-                    aria-invalid={Boolean(headersError)}
-                    value={headersText}
-                    onChange={(event) => {
-                      setHeadersText(event.target.value);
-                      setHeadersError("");
-                    }}
-                  />
-                </label>
-                {headersError && <p className="field-error full" id="headers-error" role="alert">{headersError}</p>}
-              </div>
-            </fieldset>
-
-            <div className="button-row settings-actions">
-              {form.provider === "xcli" && <button className="secondary" type="button" disabled={!form.id || gatewayChecking} onClick={() => void checkGateway()}>{gatewayChecking ? "正在检查…" : "检查已保存网关（不调用模型）"}</button>}
-              <button className="primary" type="submit">
-                <Save size={18} />
-                {form.id ? "保存并应用修改" : "保存并应用新配置"}
-              </button>
-            </div>
-            {form.provider === "xcli" && <p className="form-hint" role="status">{gatewayStatus || "填写 xcli 独立应用 Token。网关在本机，上游推理可能在云端；先保存配置再检查。"}</p>}
-          </form>
+            <LlmSettingModal
+              isOpen={llmModalOpen}
+              onClose={() => setLlmModalOpen(false)}
+              setting={editingLlmSetting}
+              onSave={props.onSave}
+              onCheckGateway={checkGateway}
+            />
+          </div>
         )}
 
         {activeSubTab === "capture" && (
@@ -5099,9 +5661,11 @@ function DailyCapturePanel(props: {
   return (
     <section className="panel settings-panel daily-capture-panel">
       <div className="settings-intro">
-        <p className="section-eyebrow">自动采集</p>
-        <h2>每日自动记录</h2>
-        <p>从本人 Git 提交和已完成的 Codex/Cursor 会话生成每天一条“多项目”工作记录。</p>
+        <div>
+          <p className="section-eyebrow">自动采集</p>
+          <h2>每日自动记录</h2>
+          <p>从本人 Git 提交和已完成的 Codex/Cursor 会话生成每天一条“多项目”工作记录。</p>
+        </div>
         <div className="settings-side-note">
           <span>隐私范围</span>
           <strong>只读取完成摘要与变更统计</strong>
@@ -5324,9 +5888,11 @@ function ReportSchedulesPanel(props: {
   return (
     <section className="panel settings-panel report-schedules-panel">
       <div className="settings-intro">
-        <p className="section-eyebrow">自动生成</p>
-        <h2>定时报告</h2>
-        <p>每种报告独立设置执行时间；到达计划时间时会更新同期间旧草稿，并避免重复生成或发送。</p>
+        <div>
+          <p className="section-eyebrow">自动生成</p>
+          <h2>定时报告计划</h2>
+          <p>按日报、周报和月报独立配置定时触发机制，到达时间自动汇总工作记录生成草稿。</p>
+        </div>
         <div className="settings-side-note">
           <span>错过执行</span>
           <strong>启动后只补生成最近一期草稿</strong>
@@ -5377,14 +5943,16 @@ function ReportScheduleCard(props: {
   const missingSmtp = form.auto_send && !props.emailSetting;
   const missingRecipients = form.auto_send && form.recipient_ids.length === 0;
   const invalidAutoSend = missingSmtp || missingRecipients;
-  const monthly = props.schedule.report_type !== "weekly_report";
+  const isDaily = props.schedule.report_type === "daily_report";
+  const isWeekly = props.schedule.report_type === "weekly_report";
+  const monthly = !isDaily && !isWeekly;
   const defaultTemplate = props.templates.find((template) => template.is_default);
   const selectedTemplate = props.templates.find((template) => template.id === form.template_id);
 
   function payload(enabled: boolean) {
     return {
       enabled,
-      weekday: monthly ? null : form.weekday,
+      weekday: isWeekly ? form.weekday : null,
       day_of_month: monthly ? form.day_of_month : null,
       template_id: form.template_id,
       run_time: form.run_time,
@@ -5445,7 +6013,14 @@ function ReportScheduleCard(props: {
       </div>
 
       <div className="schedule-fields">
-        {monthly ? (
+        {isDaily ? (
+          <label>
+            执行频次
+            <select disabled value="daily">
+              <option value="daily">每个工作日 / 每日</option>
+            </select>
+          </label>
+        ) : monthly ? (
           <label>
             每月执行日期
             <select
@@ -5526,19 +6101,17 @@ function ReportScheduleCard(props: {
       </label>
 
       {form.auto_send && (
-        <fieldset className="schedule-recipients">
-          <legend>自动发送收件人 · 已选择 {form.recipient_ids.length} 位</legend>
-          {props.recipients.length ? props.recipients.map((recipient) => (
-            <label className="recipient-check" key={recipient.id}>
-              <input
-                type="checkbox"
-                checked={form.recipient_ids.includes(recipient.id)}
-                onChange={() => toggleRecipient(recipient.id)}
-              />
-              <span><strong>{recipient.name}</strong><small>{recipient.email}</small></span>
-            </label>
-          )) : <p className="form-hint">通讯录暂无收件人，请先在下方添加。</p>}
-        </fieldset>
+        <div className="schedule-recipients-select-row">
+          <label className="compact-field">
+            <span>自动发送收件人（已选 {form.recipient_ids.length} 位）</span>
+            <RecipientMultiSelect
+              recipients={props.recipients}
+              selectedIds={form.recipient_ids}
+              onChange={(ids) => setForm((prev) => ({ ...prev, recipient_ids: ids }))}
+              placeholder="选择自动发送收件人..."
+            />
+          </label>
+        </div>
       )}
 
       {missingSmtp && <p className="field-error">请先保存 SMTP 邮箱配置，再启用自动发送。</p>}
@@ -5599,9 +6172,11 @@ function EmailSettingsPanel(props: {
   return (
     <form className="panel settings-panel" onSubmit={(event) => void save(event)}>
       <div className="settings-intro">
-        <p className="section-eyebrow">邮件投递</p>
-        <h2>SMTP 邮箱设置</h2>
-        <p>使用你的企业邮箱或个人邮箱 SMTP 服务发送报告。密码只保存在本地后端，读取时会脱敏。</p>
+        <div>
+          <p className="section-eyebrow">邮件投递</p>
+          <h2>SMTP 邮箱设置</h2>
+          <p>使用你的企业邮箱或个人邮箱 SMTP 服务发送报告。密码只保存在本地后端，读取时会脱敏。</p>
+        </div>
         <div className="settings-side-note">
           <span>密码提示</span>
           <strong>留空即可保留当前密码</strong>
@@ -5666,34 +6241,154 @@ function EmailSettingsPanel(props: {
   );
 }
 
+function RecipientModal(props: {
+  isOpen: boolean;
+  onClose: () => void;
+  recipient: Recipient | null;
+  onSave: (payload: Pick<Recipient, "name" | "email" | "is_default">, id?: number) => Promise<void>;
+}) {
+  if (!props.isOpen) return null;
+
+  const isEditing = Boolean(props.recipient);
+  const [name, setName] = React.useState(props.recipient?.name ?? "");
+  const [email, setEmail] = React.useState(props.recipient?.email ?? "");
+  const [isDefault, setIsDefault] = React.useState(props.recipient?.is_default ?? false);
+  const [isSaving, setIsSaving] = React.useState(false);
+  const [error, setError] = React.useState("");
+
+  async function handleSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!name.trim()) {
+      setError("姓名不能为空");
+      return;
+    }
+    if (!email.trim() || !email.includes("@")) {
+      setError("请输入有效的电子邮箱地址");
+      return;
+    }
+    setIsSaving(true);
+    setError("");
+    try {
+      await props.onSave(
+        { name: name.trim(), email: email.trim(), is_default: isDefault },
+        props.recipient?.id
+      );
+      props.onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "保存收件人失败");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  return (
+    <div className="settings-modal-backdrop" onClick={props.onClose}>
+      <div
+        className="settings-modal-dialog recipient-modal"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="recipient-modal-title"
+      >
+        <div className="settings-modal-header">
+          <div className="modal-title-group">
+            <div className="modal-icon-badge">
+              <Users size={20} />
+            </div>
+            <div>
+              <h2 id="recipient-modal-title">{isEditing ? "编辑收件人" : "添加常用收件人"}</h2>
+              <p>{isEditing ? `修改「${props.recipient?.name}」的信息` : "添加上级或团队成员邮箱，发送报告时可一键选中"}</p>
+            </div>
+          </div>
+          <button type="button" className="modal-close-btn" onClick={props.onClose} aria-label="关闭">
+            <X size={18} />
+          </button>
+        </div>
+
+        <form onSubmit={(e) => void handleSubmit(e)}>
+          <div className="settings-modal-body">
+            {error && <div className="error" role="alert"><CircleAlert size={16} />{error}</div>}
+
+            <div className="settings-form-grid">
+              <label className="field-group full-width">
+                <span className="field-label">姓名 / 称呼</span>
+                <input
+                  required
+                  autoFocus
+                  placeholder="例如：张主管、李经理"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                />
+              </label>
+
+              <label className="field-group full-width">
+                <span className="field-label">电子邮箱</span>
+                <input
+                  required
+                  type="email"
+                  placeholder="name@example.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                />
+              </label>
+
+              <div className="field-group full-width">
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={isDefault}
+                    onChange={(e) => setIsDefault(e.target.checked)}
+                  />
+                  <span>设为默认收件人（发送报告时自动勾选）</span>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div className="settings-modal-footer">
+            <button type="button" className="secondary" onClick={props.onClose} disabled={isSaving}>
+              取消
+            </button>
+            <button type="submit" className="primary" disabled={isSaving}>
+              {isSaving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}
+              {isSaving ? "正在保存..." : isEditing ? "保存修改" : "添加收件人"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 function RecipientDirectory(props: {
   recipients: Recipient[];
   onCreate: (payload: Pick<Recipient, "name" | "email" | "is_default">) => Promise<void>;
   onUpdate: (id: number, payload: Partial<Pick<Recipient, "name" | "email" | "is_default">>) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
 }) {
-  const emptyForm = { name: "", email: "", is_default: false };
-  const [form, setForm] = React.useState(emptyForm);
-  const [editingId, setEditingId] = React.useState<number | null>(null);
+  const [modalOpen, setModalOpen] = React.useState(false);
+  const [editingRecipient, setEditingRecipient] = React.useState<Recipient | null>(null);
+
+  function startCreate() {
+    setEditingRecipient(null);
+    setModalOpen(true);
+  }
 
   function startEdit(recipient: Recipient) {
-    setEditingId(recipient.id);
-    setForm({ name: recipient.name, email: recipient.email, is_default: recipient.is_default });
+    setEditingRecipient(recipient);
+    setModalOpen(true);
   }
 
-  function reset() {
-    setEditingId(null);
-    setForm(emptyForm);
-  }
-
-  async function save(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (editingId) {
-      await props.onUpdate(editingId, form);
+  async function handleSave(payload: Pick<Recipient, "name" | "email" | "is_default">, id?: number) {
+    if (id) {
+      await props.onUpdate(id, payload);
     } else {
-      await props.onCreate(form);
+      await props.onCreate(payload);
     }
-    reset();
+  }
+
+  async function handleToggleDefault(recipient: Recipient) {
+    await props.onUpdate(recipient.id, { is_default: !recipient.is_default });
   }
 
   async function remove(recipient: Recipient) {
@@ -5701,48 +6396,89 @@ function RecipientDirectory(props: {
       return;
     }
     await props.onDelete(recipient.id);
-    if (editingId === recipient.id) {
-      reset();
-    }
   }
 
   return (
-    <section className="panel recipient-directory">
-      <div className="panel-heading">
+    <div className="panel settings-panel recipient-directory-panel">
+      <div className="settings-panel-header">
         <div>
           <p className="section-eyebrow">报告对象</p>
           <h2>收件人通讯录</h2>
-          <p>默认收件人会在发送报告时自动勾选；可设置多个。</p>
+          <p>默认收件人会在发送报告时自动勾选；定时报告也可设置自动邮件投递对象。</p>
         </div>
-        <span className="count-badge">{props.recipients.length} 位</span>
+        <div className="panel-header-actions">
+          <span className="count-badge">{props.recipients.length} 位</span>
+          <button className="primary" type="button" onClick={startCreate}>
+            <Plus size={16} />
+            添加收件人
+          </button>
+        </div>
       </div>
-      <div className="recipient-directory-body">
-        <div className="recipient-list">
-          {props.recipients.length === 0 ? (
-            <p className="form-hint">还没有收件人。添加上级邮箱后，发送报告时可一键选中。</p>
-          ) : props.recipients.map((recipient) => (
-            <div className={editingId === recipient.id ? "recipient-row active" : "recipient-row"} key={recipient.id}>
-              <button type="button" onClick={() => startEdit(recipient)}>
-                <strong>{recipient.name}</strong>
-                <span>{recipient.email}</span>
-              </button>
-              {recipient.is_default && <em>默认</em>}
-              <button className="icon-button danger" type="button" title="删除收件人" aria-label={`删除 ${recipient.name}`} onClick={() => void remove(recipient)}><Trash2 size={16} /></button>
-            </div>
-          ))}
-        </div>
-        <form className="recipient-form" onSubmit={(event) => void save(event)}>
-          <h3>{editingId ? "编辑收件人" : "添加收件人"}</h3>
-          <label>姓名<input required value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></label>
-          <label>邮箱<input required type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} /></label>
-          <label className="toggle"><input type="checkbox" checked={form.is_default} onChange={(event) => setForm({ ...form, is_default: event.target.checked })} />默认收件人</label>
-          <div className="button-row">
-            <button className="primary" type="submit"><Plus size={17} />{editingId ? "保存修改" : "添加收件人"}</button>
-            {editingId && <button className="secondary" type="button" onClick={reset}>取消</button>}
+
+      <div className="recipient-cards-grid">
+        {props.recipients.length === 0 ? (
+          <div className="recipient-empty-card">
+            <Users size={36} />
+            <strong>通讯录中还没有收件人</strong>
+            <p>添加上级领导或协同同事邮箱，在发送报告时可一键多选，支持定时报告自动邮件投递。</p>
+            <button className="primary" type="button" onClick={startCreate}>
+              <Plus size={16} />
+              添加第一位收件人
+            </button>
           </div>
-        </form>
+        ) : (
+          props.recipients.map((recipient) => (
+            <div className="recipient-card" key={recipient.id}>
+              <div className="recipient-card-main">
+                <div className="recipient-avatar">
+                  {recipient.name.slice(0, 1).toUpperCase()}
+                </div>
+                <div className="recipient-card-details">
+                  <div className="recipient-name-row">
+                    <strong>{recipient.name}</strong>
+                    {recipient.is_default && <span className="default-pill">默认</span>}
+                  </div>
+                  <span className="recipient-email">{recipient.email}</span>
+                </div>
+              </div>
+              <div className="recipient-card-actions">
+                <button
+                  type="button"
+                  className={`subtle-btn ${recipient.is_default ? "active" : ""}`}
+                  title={recipient.is_default ? "取消默认收件人" : "设为默认收件人"}
+                  onClick={() => void handleToggleDefault(recipient)}
+                >
+                  {recipient.is_default ? "已设默认" : "设为默认"}
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => startEdit(recipient)}
+                >
+                  <Pencil size={14} />
+                  编辑
+                </button>
+                <button
+                  type="button"
+                  className="icon-button danger"
+                  title="删除收件人"
+                  onClick={() => void remove(recipient)}
+                >
+                  <Trash2 size={16} />
+                </button>
+              </div>
+            </div>
+          ))
+        )}
       </div>
-    </section>
+
+      <RecipientModal
+        isOpen={modalOpen}
+        onClose={() => setModalOpen(false)}
+        recipient={editingRecipient}
+        onSave={handleSave}
+      />
+    </div>
   );
 }
 

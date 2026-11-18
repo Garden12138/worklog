@@ -277,7 +277,8 @@ pub async fn chat_modify_work_log(
     candidate_logs: &[WorkLog],
     messages: &[ChatMessage],
 ) -> AppResult<WorkLogDialogueResponse> {
-    let candidate_logs_text = format_candidate_logs_for_prompt(candidate_logs, target_log_ids, current_editing_id);
+    let candidate_logs_text =
+        format_candidate_logs_for_prompt(candidate_logs, target_log_ids, current_editing_id);
     let system_prompt = format!(
         "你是一位专业严谨的工作记录修改助手。你的任务是通过自然语言对话，帮助用户识别并修改每日工作记录。支持同时修改单条或多条记录。\n\n\
          【系统环境】：\n\
@@ -338,7 +339,11 @@ pub async fn chat_modify_work_log(
     }));
 
     for msg in messages {
-        let role = if msg.role == "assistant" { "assistant" } else { "user" };
+        let role = if msg.role == "assistant" {
+            "assistant"
+        } else {
+            "user"
+        };
         chat_messages.push(json!({
             "role": role,
             "content": msg.content
@@ -434,7 +439,10 @@ pub fn parse_work_log_dialogue_response(
     if let Some(actions_val) = value.get("actions").and_then(Value::as_array) {
         for act_val in actions_val {
             if let Some(act) = extract_modification_action(act_val, candidate_logs) {
-                if !actions.iter().any(|existing: &WorkLogModificationAction| existing.log_id == act.log_id) {
+                if !actions
+                    .iter()
+                    .any(|existing: &WorkLogModificationAction| existing.log_id == act.log_id)
+                {
                     actions.push(act);
                 }
             }
@@ -685,8 +693,14 @@ fn compute_field_changes(original: &WorkLog, updated: &WorkLogInput) -> Vec<Fiel
         changes.push(FieldChange {
             field: "hours".into(),
             label: "工时".into(),
-            old_value: original.hours.map(|h| format!("{h}h")).or_else(|| Some("未填写".into())),
-            new_value: updated.hours.map(|h| format!("{h}h")).or_else(|| Some("未填写".into())),
+            old_value: original
+                .hours
+                .map(|h| format!("{h}h"))
+                .or_else(|| Some("未填写".into())),
+            new_value: updated
+                .hours
+                .map(|h| format!("{h}h"))
+                .or_else(|| Some("未填写".into())),
         });
     }
 
@@ -778,7 +792,7 @@ fn parse_daily_summary(raw: &str) -> AppResult<DailyWorkSummary> {
             for (idx, item) in lines.into_iter().enumerate() {
                 if item.starts_with('-')
                     || item.starts_with('*')
-                    || item.chars().next().map_or(false, |c| c.is_ascii_digit())
+                    || item.chars().next().is_some_and(|c| c.is_ascii_digit())
                 {
                     formatted.push(item.to_string());
                 } else {
@@ -863,33 +877,44 @@ async fn chat(config: &LlmConfig, mut payload: Value) -> AppResult<String> {
         payload["max_tokens"] = json!(4096);
         payload["chat_template_kwargs"] = json!({"thinking": false});
     }
-    let client = if config.provider == "xcli" {
-        crate::xcli::client(config.timeout_seconds)?
-    } else {
-        Client::builder()
-            .timeout(Duration::from_secs(
-                config.timeout_seconds.clamp(5, 600) as u64
-            ))
-            .build()
-            .map_err(|error| AppError::new("llm_error", error.to_string()))?
-    };
     if config.provider == "xcli" {
-        crate::xcli::probe_with(&client, config).await?;
+        let xcli_path = crate::xcli::resolve_xcli_path(Some(config));
+        let messages = payload.get("messages").and_then(Value::as_array);
+        let mut prompt = String::new();
+        if let Some(msgs) = messages {
+            for m in msgs {
+                let role = m.get("role").and_then(Value::as_str).unwrap_or("");
+                let content = m.get("content").and_then(Value::as_str).unwrap_or("");
+                if !content.is_empty() {
+                    if !prompt.is_empty() {
+                        prompt.push_str("\n\n");
+                    }
+                    if role == "system" {
+                        prompt.push_str(&format!("【设定要求】\n{content}"));
+                    } else {
+                        prompt.push_str(content);
+                    }
+                }
+            }
+        } else {
+            prompt = payload.to_string();
+        }
+        let answer = crate::xcli::run_xcli_ask(&xcli_path, &prompt).await?;
+        return sanitize_chat_content(&answer);
     }
+    let client = Client::builder()
+        .timeout(Duration::from_secs(
+            config.timeout_seconds.clamp(5, 600) as u64
+        ))
+        .build()
+        .map_err(|error| AppError::new("llm_error", error.to_string()))?;
     let request = build_chat_request(&client, config, &payload)?;
     let response = client.execute(request).await.map_err(|error| {
-        if config.provider == "xcli" {
-            return crate::xcli::transport_error();
-        }
         AppError::new(
             "llm_unreachable",
             format!("Unable to reach LLM provider: {error}"),
         )
     })?;
-    if config.provider == "xcli" {
-        let body = crate::xcli::json_response(response).await?;
-        return sanitize_chat_content(&extract_chat_content(&body)?);
-    }
     let status = response.status();
     let body: Value = response
         .json()
@@ -929,9 +954,6 @@ fn build_chat_request(
     config: &LlmConfig,
     payload: &Value,
 ) -> AppResult<reqwest::Request> {
-    if config.provider == "xcli" {
-        crate::xcli::validate_config(config)?;
-    }
     let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
     let mut request = client
         .post(url)
@@ -1300,7 +1322,8 @@ mod tests {
         }
         ```"#;
 
-        let res = parse_work_log_dialogue_response(json_resp, &[sample_log.clone()]).unwrap();
+        let res =
+            parse_work_log_dialogue_response(json_resp, std::slice::from_ref(&sample_log)).unwrap();
         assert!(res.reply.contains("已为您将工时调整为 4 小时"));
         assert!(res.action.is_some());
 
@@ -1309,10 +1332,17 @@ mod tests {
         assert_eq!(action.updated.hours, Some(4.0));
         assert_eq!(action.updated.priority.as_deref(), Some("high"));
         assert_eq!(action.updated.blockers.as_deref(), Some("等待后端接口联调"));
-        assert_eq!(action.updated.progress.as_deref(), Some("完成了原型设计与前端联调"));
+        assert_eq!(
+            action.updated.progress.as_deref(),
+            Some("完成了原型设计与前端联调")
+        );
 
         // Verify computed field changes
-        let changed_fields: Vec<&str> = action.changes_summary.iter().map(|c| c.field.as_str()).collect();
+        let changed_fields: Vec<&str> = action
+            .changes_summary
+            .iter()
+            .map(|c| c.field.as_str())
+            .collect();
         assert!(changed_fields.contains(&"hours"));
         assert!(changed_fields.contains(&"blockers"));
         assert!(changed_fields.contains(&"priority"));
@@ -1397,8 +1427,15 @@ mod tests {
         assert_eq!(action.updated.priority.as_deref(), Some("urgent"));
         assert_eq!(action.updated.blockers, None);
 
-        let blockers_change = action.changes_summary.iter().find(|c| c.field == "blockers").unwrap();
-        assert_eq!(blockers_change.old_value.as_deref(), Some("原阻塞：网络延迟过高"));
+        let blockers_change = action
+            .changes_summary
+            .iter()
+            .find(|c| c.field == "blockers")
+            .unwrap();
+        assert_eq!(
+            blockers_change.old_value.as_deref(),
+            Some("原阻塞：网络延迟过高")
+        );
         assert_eq!(blockers_change.new_value.as_deref(), Some("无"));
     }
 

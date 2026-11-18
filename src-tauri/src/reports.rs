@@ -116,7 +116,8 @@ pub async fn resolve_unique_title(
     loop {
         let candidate_full = format!("{}（{}）", base_title, next_index);
         let candidate_half = format!("{}({})", base_title, next_index);
-        if !existing_titles.contains(&candidate_full) && !existing_titles.contains(&candidate_half) {
+        if !existing_titles.contains(&candidate_full) && !existing_titles.contains(&candidate_half)
+        {
             return Ok(candidate_full);
         }
         next_index += 1;
@@ -173,12 +174,106 @@ async fn generate_inner(
         .await?;
         let config = active_config(pool, secrets).await?;
 
-        let base_title = format!("{} 至 {} {}", period_start, period_end, report_title(report_type));
+        let base_title = if period_start == period_end {
+            format!("{} {}", period_start, report_title(report_type))
+        } else {
+            format!("{} 至 {} {}", period_start, period_end, report_title(report_type))
+        };
         let title = if let Some(existing) = &existing {
             existing.title.clone()
         } else {
             resolve_unique_title(pool, &base_title, None).await?
         };
+
+        if config.as_ref().map(|c| c.provider.as_str()) == Some("xcli") {
+            let xcli_path = crate::xcli::resolve_xcli_path(config.as_ref());
+            let unique_id = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let task_dir = std::env::temp_dir().join(format!("worklog-xcli-task-{}-{}", task_id, unique_id));
+            std::fs::create_dir_all(&task_dir)?;
+            let work_items_file = task_dir.join("work-items.json");
+            tokio::fs::write(&work_items_file, serde_json::to_string_pretty(&logs)?).await?;
+
+            let goal = crate::xcli::build_report_goal(
+                report_type,
+                period_start,
+                period_end,
+                Some(&template.content),
+            );
+
+            let mut metadata = std::collections::HashMap::new();
+            metadata.insert("app".into(), "worklog".into());
+            metadata.insert("report_id".into(), task_id.to_string());
+            metadata.insert(
+                "report_type".into(),
+                match report_type {
+                    "daily_report" => "daily",
+                    "weekly_report" => "weekly",
+                    "monthly_report" => "monthly",
+                    "performance_review" => "performance",
+                    other => other,
+                }
+                .into(),
+            );
+
+            let (agent, agents) = if let Some(cfg) = config.as_ref() {
+                let m = cfg.model.trim();
+                if m.is_empty() {
+                    (None, Vec::new())
+                } else if m.contains(',') {
+                    (
+                        None,
+                        m.split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect(),
+                    )
+                } else {
+                    (Some(m.to_string()), Vec::new())
+                }
+            } else {
+                (None, Vec::new())
+            };
+            let timeout_sec = config.as_ref().map(|c| c.timeout_seconds as u64);
+
+            let xcli_req = crate::xcli::XcliRequest {
+                version: 1,
+                capability: "ask".into(),
+                permission: Some("read".into()),
+                goal,
+                agent,
+                agents,
+                timeout_sec,
+                inputs: vec![work_items_file.display().to_string()],
+                schema: Some(crate::xcli::report_json_schema()),
+                metadata,
+            };
+
+            let xcli_task_id = crate::xcli::submit_task(&xcli_path, &xcli_req).await?;
+            let now = now_string();
+            sqlx::query(
+                "UPDATE generation_tasks SET xcli_task_id=?, template_id=?, title=?, overwrite=?, status='running', prompt_inputs=?, updated_at=? WHERE id=?",
+            )
+            .bind(&xcli_task_id)
+            .bind(template.id)
+            .bind(&title)
+            .bind(overwrite)
+            .bind(work_items_file.display().to_string())
+            .bind(&now)
+            .bind(task_id)
+            .execute(pool)
+            .await?;
+
+            let report = crate::xcli::execute_task_lifecycle(pool, &xcli_path, task_id, |_, _| {}).await?;
+            let _ = std::fs::remove_dir_all(&task_dir);
+            return Ok(GenerateResponse {
+                report,
+                task_id,
+                used_llm: true,
+            });
+        }
 
         let (content, used_llm) = if requires_llm_fill(&template.name, &template.content) {
             let generated = fill_template(
@@ -288,7 +383,7 @@ async fn generate_inner(
     result
 }
 
-async fn get_template(
+pub(crate) async fn get_template(
     pool: &SqlitePool,
     report_type: &str,
     template_id: Option<i64>,
@@ -335,7 +430,9 @@ pub fn resolve_period(
         .map(|value| parse_date(value, "anchor_date"))
         .transpose()?
         .unwrap_or_else(|| Local::now().date_naive());
-    let (start, end) = if report_type == "weekly_report" {
+    let (start, end) = if report_type == "daily_report" {
+        (anchor, anchor)
+    } else if report_type == "weekly_report" {
         let offset = anchor.weekday().num_days_from_monday() as i64;
         let start = anchor - Duration::days(offset);
         (start, start + Duration::days(6))
@@ -353,7 +450,9 @@ pub fn resolve_period(
 
 pub fn scheduled_period(report_type: &str, occurrence: NaiveDate) -> AppResult<(String, String)> {
     validate_report_type(report_type)?;
-    if report_type == "weekly_report" {
+    if report_type == "daily_report" {
+        Ok((occurrence.to_string(), occurrence.to_string()))
+    } else if report_type == "weekly_report" {
         let start = occurrence - Duration::days(occurrence.weekday().num_days_from_monday() as i64);
         Ok((start.to_string(), occurrence.to_string()))
     } else {
@@ -366,7 +465,7 @@ pub fn scheduled_period(report_type: &str, occurrence: NaiveDate) -> AppResult<(
 
 pub fn validate_report_type(value: &str) -> AppResult<()> {
     match value {
-        "weekly_report" | "monthly_report" | "performance_review" => Ok(()),
+        "daily_report" | "weekly_report" | "monthly_report" | "performance_review" => Ok(()),
         _ => Err(AppError::validation(
             "report_type",
             "Unsupported report type",
@@ -379,7 +478,7 @@ pub fn parse_date(value: &str, field: &str) -> AppResult<NaiveDate> {
         .map_err(|_| AppError::validation(field, "Date must use YYYY-MM-DD format"))
 }
 
-fn local_datetime() -> String {
+pub(crate) fn local_datetime() -> String {
     chrono::Utc::now()
         .with_timezone(&chrono_tz::Asia::Shanghai)
         .format("%Y-%m-%d %H:%M:%S")
@@ -447,7 +546,9 @@ mod tests {
 
         let base = "2026-11-02 至 2026-11-08 周报";
         assert_eq!(
-            resolve_unique_title(&database.pool, base, None).await.unwrap(),
+            resolve_unique_title(&database.pool, base, None)
+                .await
+                .unwrap(),
             base
         );
 
@@ -463,7 +564,9 @@ mod tests {
 
         // Second should be （1）
         assert_eq!(
-            resolve_unique_title(&database.pool, base, None).await.unwrap(),
+            resolve_unique_title(&database.pool, base, None)
+                .await
+                .unwrap(),
             format!("{}（1）", base)
         );
 
@@ -479,19 +582,25 @@ mod tests {
 
         // Third should be （2）
         assert_eq!(
-            resolve_unique_title(&database.pool, base, None).await.unwrap(),
+            resolve_unique_title(&database.pool, base, None)
+                .await
+                .unwrap(),
             format!("{}（2）", base)
         );
 
         // When excluding id2, （1） becomes available
         assert_eq!(
-            resolve_unique_title(&database.pool, base, Some(id2)).await.unwrap(),
+            resolve_unique_title(&database.pool, base, Some(id2))
+                .await
+                .unwrap(),
             format!("{}（1）", base)
         );
 
         // When excluding id1, base title becomes available
         assert_eq!(
-            resolve_unique_title(&database.pool, base, Some(id1)).await.unwrap(),
+            resolve_unique_title(&database.pool, base, Some(id1))
+                .await
+                .unwrap(),
             base
         );
     }

@@ -311,6 +311,42 @@ pub struct GenerateResponse {
     pub used_llm: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct GenerationTask {
+    pub id: i64,
+    pub report_type: String,
+    pub period_start: String,
+    pub period_end: String,
+    pub status: String,
+    pub message: Option<String>,
+    pub report_id: Option<i64>,
+    pub completed_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub xcli_task_id: Option<String>,
+    pub last_seq: Option<i64>,
+    pub step_progress: Option<String>,
+    pub prompt_inputs: Option<String>,
+    pub template_id: Option<i64>,
+    pub title: Option<String>,
+    pub overwrite: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerationTaskStatus {
+    pub id: i64,
+    pub report_type: String,
+    pub period_start: String,
+    pub period_end: String,
+    pub status: String,
+    pub message: Option<String>,
+    pub report_id: Option<i64>,
+    pub xcli_task_id: Option<String>,
+    pub last_seq: i64,
+    pub step_progress: Option<String>,
+    pub title: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ReportSchedule {
     pub id: i64,

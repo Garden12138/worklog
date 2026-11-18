@@ -207,7 +207,10 @@ pub async fn normalize_source_path(source_type: &str, path: &str) -> AppResult<S
         ));
     }
     // If it's a multi-repo workspace containing child git repositories, preserve canonical workspace root!
-    if repos.iter().any(|r| r.starts_with(&candidate) && r != &candidate) {
+    if repos
+        .iter()
+        .any(|r| r.starts_with(&candidate) && r != &candidate)
+    {
         return Ok(canonical);
     }
     // Single git repository: resolve top-level root
@@ -665,7 +668,8 @@ fn collect_git(source: &ActivitySource, date: NaiveDate) -> AppResult<Vec<Collec
 
             let author_matches = if !effective_email.is_empty() {
                 author_email.eq_ignore_ascii_case(&effective_email)
-                    || (!global_email.is_empty() && author_email.eq_ignore_ascii_case(&global_email))
+                    || (!global_email.is_empty()
+                        && author_email.eq_ignore_ascii_case(&global_email))
             } else {
                 author_name == effective_name
                     || (!global_name.is_empty() && author_name == global_name)
@@ -1012,7 +1016,8 @@ async fn collect_cursor(
                     edited_files_count
                 };
 
-                let is_edited = subtitle.starts_with("Edited ") || files > 0 || added > 0 || removed > 0;
+                let is_edited =
+                    subtitle.starts_with("Edited ") || files > 0 || added > 0 || removed > 0;
                 let has_custom_name = raw_name
                     .map(|n| n != "Cursor 完成会话" && !n.trim().is_empty())
                     .unwrap_or(false);
@@ -1022,11 +1027,12 @@ async fn collect_cursor(
                     continue;
                 }
 
-                let clean_subtitle = if subtitle.starts_with("Edited ") || subtitle.starts_with("Read ") {
-                    ""
-                } else {
-                    subtitle
-                };
+                let clean_subtitle =
+                    if subtitle.starts_with("Edited ") || subtitle.starts_with("Read ") {
+                        ""
+                    } else {
+                        subtitle
+                    };
                 let stats = if added > 0 || removed > 0 {
                     format!("（涉及 {files} 个文件变更，+{added}/-{removed} 行）")
                 } else if files > 0 {
@@ -1175,7 +1181,8 @@ async fn collect_cursor(
                     edited_files_count
                 };
 
-                let is_edited = subtitle.starts_with("Edited ") || files > 0 || added > 0 || removed > 0;
+                let is_edited =
+                    subtitle.starts_with("Edited ") || files > 0 || added > 0 || removed > 0;
                 let has_custom_name = raw_name
                     .map(|n| n != "Cursor 完成会话" && !n.trim().is_empty())
                     .unwrap_or(false);
@@ -1185,11 +1192,12 @@ async fn collect_cursor(
                     continue;
                 }
 
-                let clean_subtitle = if subtitle.starts_with("Edited ") || subtitle.starts_with("Read ") {
-                    ""
-                } else {
-                    subtitle
-                };
+                let clean_subtitle =
+                    if subtitle.starts_with("Edited ") || subtitle.starts_with("Read ") {
+                        ""
+                    } else {
+                        subtitle
+                    };
                 let stats = if added > 0 || removed > 0 {
                     format!("（涉及 {files} 个文件变更，+{added}/-{removed} 行）")
                 } else if files > 0 {
@@ -1448,7 +1456,9 @@ fn clean_summary_for_display(summary: &str) -> String {
         }
     }
     // Strip conventional commit type but keep scope (e.g. docs(V3.20.2): -> (V3.20.2): )
-    let raw_prefixes = ["feat", "fix", "docs", "chore", "refactor", "style", "perf", "test", "merge"];
+    let raw_prefixes = [
+        "feat", "fix", "docs", "chore", "refactor", "style", "perf", "test", "merge",
+    ];
     for prefix in raw_prefixes {
         if text.starts_with(&format!("{prefix}:")) {
             text = text[prefix.len() + 1..].trim();
@@ -1540,22 +1550,18 @@ fn fallback_summary(date: NaiveDate, evidence: &[ActivityEvidence]) -> DailyWork
                 }
             }
         }
-        if detected_topic.is_none() {
-            if item.summary.contains("5G消息")
+        if detected_topic.is_none()
+            && (item.summary.contains("5G消息")
                 || item.summary.contains("5gmc")
-                || item.summary.to_lowercase().contains("5g message")
-            {
-                detected_topic = Some("5G消息模板".to_string());
-            }
+                || item.summary.to_lowercase().contains("5g message"))
+        {
+            detected_topic = Some("5G消息模板".to_string());
         }
 
         // If we already have git commits, skip cursor session slugs like "5G message template migration:fix"
         if has_git_commits && item.source_type == "cursor" {
             let lower = item.summary.to_lowercase();
-            if lower.contains("migration:")
-                || lower.starts_with("untitled-")
-                || lower.chars().all(|c| c.is_ascii())
-            {
+            if lower.contains("migration:") || lower.starts_with("untitled-") || lower.is_ascii() {
                 continue;
             }
         }
@@ -1625,7 +1631,10 @@ fn fallback_summary(date: NaiveDate, evidence: &[ActivityEvidence]) -> DailyWork
     DailyWorkSummary {
         task,
         progress,
-        result: Some(format!("共完成 {} 项模块功能与接口提交验收。", evidence.len())),
+        result: Some(format!(
+            "共完成 {} 项模块功能与接口提交验收。",
+            evidence.len()
+        )),
         blockers: None,
     }
 }
@@ -1993,7 +2002,8 @@ pub async fn compute_agent_breakdown(
         .await
         .unwrap_or(0);
 
-        let (duration_sec, detected_sessions) = compute_cursor_duration(&cp, start_utc, end_utc).await;
+        let (duration_sec, detected_sessions) =
+            compute_cursor_duration(&cp, start_utc, end_utc).await;
         let final_count = evidence_count.max(detected_sessions as i64);
         let final_hours = if duration_sec > 0 {
             (duration_sec as f64 / 3600.0 * 10.0).round() / 10.0
@@ -2149,7 +2159,9 @@ async fn compute_codex_duration(
                 }
             }
         }
-        let Ok(f) = fs::File::open(&file) else { continue };
+        let Ok(f) = fs::File::open(&file) else {
+            continue;
+        };
         let reader = BufReader::new(f);
         for line in reader.lines() {
             let Ok(l) = line else { continue };
@@ -2411,13 +2423,7 @@ mod tests {
             run_git(repo, &["config", "user.email", "me@example.com"], None);
             run_git(repo, &["config", "commit.gpgsign", "false"], None);
             run_git(repo, &["checkout", "-b", "main"], None);
-            commit_file(
-                repo,
-                file,
-                "content\n",
-                msg,
-                "2026-09-17T10:00:00+08:00",
-            );
+            commit_file(repo, file, "content\n", msg, "2026-09-17T10:00:00+08:00");
         }
 
         let source = ActivitySource {
@@ -2436,8 +2442,12 @@ mod tests {
         let evidence = collect_git(&source, NaiveDate::from_ymd_opt(2026, 9, 17).unwrap()).unwrap();
         assert_eq!(evidence.len(), 2);
         assert!(evidence.iter().all(|e| e.project == "多仓库工作区"));
-        assert!(evidence.iter().any(|e| e.summary.contains("[biz-a] feat: 完成组件A开发")));
-        assert!(evidence.iter().any(|e| e.summary.contains("[biz-b] fix: 修复组件B边界异常")));
+        assert!(evidence
+            .iter()
+            .any(|e| e.summary.contains("[biz-a] feat: 完成组件A开发")));
+        assert!(evidence
+            .iter()
+            .any(|e| e.summary.contains("[biz-b] fix: 修复组件B边界异常")));
 
         fs::remove_dir_all(workspace).unwrap();
     }
@@ -2759,7 +2769,10 @@ mod tests {
         let evidence = collect_cursor(
             &source,
             NaiveDate::from_ymd_opt(2026, 9, 17).unwrap(),
-            &[(project_dir, "Project B".into()), (project_c, "Project C".into())],
+            &[
+                (project_dir, "Project B".into()),
+                (project_c, "Project C".into()),
+            ],
         )
         .await
         .unwrap();
@@ -2778,7 +2791,10 @@ mod tests {
             "Phase S5 task completion（涉及 2 个文件变更）"
         );
         assert_eq!(
-            evidence[2].metadata.get("files_changed").and_then(Value::as_i64),
+            evidence[2]
+                .metadata
+                .get("files_changed")
+                .and_then(Value::as_i64),
             Some(2)
         );
 

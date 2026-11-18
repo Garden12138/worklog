@@ -93,7 +93,8 @@ pub fn requires_llm_fill(template_name: &str, content: &str) -> bool {
         return true;
     }
 
-    let fill_pattern = Regex::new(r"【[^】]*(?:填写|说明|要求|输出|格式|请按)[^】]*】|_{3,}").unwrap();
+    let fill_pattern =
+        Regex::new(r"【[^】]*(?:填写|说明|要求|输出|格式|请按)[^】]*】|_{3,}").unwrap();
     if fill_pattern.is_match(content) {
         return true;
     }
@@ -281,6 +282,7 @@ fn format_number(value: f64) -> String {
 
 pub fn report_title(report_type: &str) -> &'static str {
     match report_type {
+        "daily_report" => "日报",
         "weekly_report" => "周报",
         "monthly_report" => "月报",
         "performance_review" => "绩效考核表",
@@ -302,10 +304,19 @@ mod tests {
     #[test]
     fn recognizes_plain_placeholder_templates() {
         assert!(requires_llm_fill("", "月份：____\n【填写核心任务】"));
-        assert!(requires_llm_fill("garden_bojin_weekly_short", "# {{ title }}"));
+        assert!(requires_llm_fill(
+            "garden_bojin_weekly_short",
+            "# {{ title }}"
+        ));
         assert!(requires_llm_fill("短周报", "# {{ title }}"));
-        assert!(requires_llm_fill("", "# {{ title }}\n{% for item in work_items %}{{ item.task }}{% endfor %}"));
-        assert!(!requires_llm_fill("默认周报模板", "# {{ title }}\n{{ ai_content }}\n{{ work_items }}"));
+        assert!(requires_llm_fill(
+            "",
+            "# {{ title }}\n{% for item in work_items %}{{ item.task }}{% endfor %}"
+        ));
+        assert!(!requires_llm_fill(
+            "默认周报模板",
+            "# {{ title }}\n{{ ai_content }}\n{{ work_items }}"
+        ));
         assert!(!requires_llm_fill("默认周报模板", "# {{ title }}"));
     }
 }

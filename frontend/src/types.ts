@@ -1,4 +1,4 @@
-export type ReportType = "weekly_report" | "monthly_report" | "performance_review";
+export type ReportType = "daily_report" | "weekly_report" | "monthly_report" | "performance_review";
 export type Priority = "low" | "medium" | "high" | "urgent";
 export type Provider = "xcli" | "openai" | "nvidia" | "openrouter" | "minimax" | "bailian";
 export type ActivitySourceType = "git" | "codex" | "cursor";
@@ -175,6 +175,38 @@ export interface GenerateResponse {
   report: Report;
   task_id: number;
   used_llm: boolean;
+}
+
+export interface GenerationTaskStatus {
+  id: number;
+  report_type: ReportType;
+  period_start: string;
+  period_end: string;
+  status: string;
+  message?: string | null;
+  report_id?: number | null;
+  xcli_task_id?: string | null;
+  last_seq: number;
+  step_progress?: string | null;
+  title?: string | null;
+}
+
+export interface XcliAgentInfo {
+  name: string;
+  installed: boolean;
+  path: string;
+  version: string;
+  auth: string;
+  available: boolean;
+  cooldown_until: string;
+  strengths?: Record<string, number>;
+}
+
+export interface XcliConnectionInfo {
+  model: string;
+  inference_location: string;
+  agents: XcliAgentInfo[];
+  summary: string;
 }
 
 export interface DesktopPreferences {

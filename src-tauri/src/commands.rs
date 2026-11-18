@@ -12,7 +12,7 @@ use chrono::{Datelike, Utc};
 use chrono_tz::Asia::Shanghai;
 use sqlx::{QueryBuilder, Row, Sqlite};
 use std::path::PathBuf;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 
 fn clean_optional(value: Option<String>) -> Option<String> {
@@ -98,7 +98,11 @@ pub async fn get_month_work_log_dates(
     .bind(&pattern)
     .fetch_all(&state.db.pool)
     .await?;
-    let dates = rows.into_iter().map(|r| r.0).filter(|d| !d.is_empty()).collect();
+    let dates = rows
+        .into_iter()
+        .map(|r| r.0)
+        .filter(|d| !d.is_empty())
+        .collect();
     Ok(dates)
 }
 
@@ -205,7 +209,8 @@ pub async fn get_work_report_summary(
     let mut week_total_hours = 0.0;
     let mut active_days = 0;
     let mut total_tasks = 0;
-    let mut project_hours_map: std::collections::HashMap<String, (f64, i64)> = std::collections::HashMap::new();
+    let mut project_hours_map: std::collections::HashMap<String, (f64, i64)> =
+        std::collections::HashMap::new();
 
     for i in 0..7 {
         let current_date = monday + chrono::Duration::days(i);
@@ -233,7 +238,7 @@ pub async fn get_work_report_summary(
                 .sum();
             let unassigned_count = day_logs
                 .iter()
-                .filter(|l| l.hours.map_or(true, |h| h <= 0.0))
+                .filter(|l| l.hours.is_none_or(|h| h <= 0.0))
                 .count();
 
             let total_for_day = if unassigned_count == 0 {
@@ -252,7 +257,11 @@ pub async fn get_work_report_summary(
 
             for log in &day_logs {
                 let log_h = if let Some(h) = log.hours {
-                    if h > 0.0 { h } else { unassigned_share }
+                    if h > 0.0 {
+                        h
+                    } else {
+                        unassigned_share
+                    }
                 } else {
                     unassigned_share
                 };
@@ -282,7 +291,9 @@ pub async fn get_work_report_summary(
                     }
                 }
 
-                let entry = project_hours_map.entry(log.project.clone()).or_insert((0.0, 0));
+                let entry = project_hours_map
+                    .entry(log.project.clone())
+                    .or_insert((0.0, 0));
                 entry.0 += log_h;
                 entry.1 += 1;
             }
@@ -322,7 +333,11 @@ pub async fn get_work_report_summary(
         })
         .collect();
 
-    top_projects.sort_by(|a, b| b.hours.partial_cmp(&a.hours).unwrap_or(std::cmp::Ordering::Equal));
+    top_projects.sort_by(|a, b| {
+        b.hours
+            .partial_cmp(&a.hours)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let week_avg_hours = if active_days > 0 {
         ((week_total_hours / active_days as f64) * 10.0).round() / 10.0
@@ -333,7 +348,8 @@ pub async fn get_work_report_summary(
     let log_agent_sessions: i64 = logs.iter().map(|l| l.agent_session_count).sum();
     let agent_stats = activity::compute_agent_breakdown(&state.db.pool, monday, sunday).await;
     let agent_detected_sessions: i64 = agent_stats.iter().map(|s| s.session_count).sum();
-    let agent_total_hours = (agent_stats.iter().map(|s| s.duration_hours).sum::<f64>() * 10.0).round() / 10.0;
+    let agent_total_hours =
+        (agent_stats.iter().map(|s| s.duration_hours).sum::<f64>() * 10.0).round() / 10.0;
     let agent_sessions = agent_detected_sessions.max(log_agent_sessions);
 
     let commit_summaries: Vec<String> = sqlx::query_scalar(
@@ -506,7 +522,10 @@ pub async fn chat_modify_work_log(
         .find(|m| m.role == "user")
         .ok_or_else(|| AppError::validation("messages", "Last message must be from user"))?;
     if last_user_msg.content.trim().is_empty() {
-        return Err(AppError::validation("messages", "User message cannot be empty"));
+        return Err(AppError::validation(
+            "messages",
+            "User message cannot be empty",
+        ));
     }
 
     let config = llm::active_config(&state.db.pool, &state.secrets).await?;
@@ -896,9 +915,346 @@ pub async fn generate_report(
 }
 
 #[tauri::command]
-pub async fn list_active_generations(
+pub async fn start_report_generation(
+    app: AppHandle,
     state: State<'_, AppState>,
-) -> AppResult<Vec<String>> {
+    payload: ReportGenerateInput,
+) -> AppResult<GenerationTaskStatus> {
+    reports::validate_report_type(&payload.report_type)?;
+    let (period_start, period_end) = reports::resolve_period(
+        &payload.report_type,
+        payload.anchor_date.as_deref(),
+        payload.period_start.as_deref(),
+        payload.period_end.as_deref(),
+    )?;
+    let config = llm::active_config(&state.db.pool, &state.secrets).await?;
+    let is_xcli = config.as_ref().map(|c| c.provider.as_str()) == Some("xcli");
+
+    if !is_xcli {
+        let pool = state.db.pool.clone();
+        let secrets = state.secrets.clone();
+        let active = state.active_generations.clone();
+        let app_handle = app.clone();
+        let payload_clone = payload.clone();
+
+        tokio::spawn(async move {
+            match reports::generate(&pool, &secrets, &active, payload_clone).await {
+                Ok(resp) => {
+                    let _ = app_handle.emit(
+                        "xcli:completed",
+                        serde_json::json!({
+                            "task_id": resp.task_id,
+                            "report": resp.report,
+                        }),
+                    );
+                }
+                Err(err) => {
+                    let _ = app_handle.emit(
+                        "xcli:failed",
+                        serde_json::json!({
+                            "task_id": 0,
+                            "error": err.message,
+                        }),
+                    );
+                }
+            }
+        });
+
+        return Ok(GenerationTaskStatus {
+            id: 0,
+            report_type: payload.report_type,
+            period_start,
+            period_end,
+            status: "running".into(),
+            message: None,
+            report_id: None,
+            xcli_task_id: None,
+            last_seq: 0,
+            step_progress: Some("正在生成报告...".into()),
+            title: None,
+        });
+    }
+
+    let xcli_path = crate::xcli::resolve_xcli_path(config.as_ref());
+    let template =
+        crate::reports::get_template(&state.db.pool, &payload.report_type, payload.template_id)
+            .await?;
+    let base_title = if period_start == period_end {
+        format!(
+            "{} {}",
+            period_start,
+            crate::templates::report_title(&payload.report_type)
+        )
+    } else {
+        format!(
+            "{} 至 {} {}",
+            period_start,
+            period_end,
+            crate::templates::report_title(&payload.report_type)
+        )
+    };
+    let title = reports::resolve_unique_title(&state.db.pool, &base_title, None).await?;
+
+    let logs = sqlx::query_as::<_, WorkLog>(
+        "SELECT id, work_date, start_date, end_date, project, task, progress, result, blockers, hours, priority, notes, origin, auto_capture_date, manually_edited, git_commit_count, agent_session_count, pending_evidence_count, created_at, updated_at \
+         FROM work_logs WHERE end_date >= ? AND start_date <= ? ORDER BY start_date, end_date, id",
+    )
+    .bind(&period_start)
+    .bind(&period_end)
+    .fetch_all(&state.db.pool)
+    .await?;
+
+    let now = now_string();
+    let generation_task_id = sqlx::query(
+        "INSERT INTO generation_tasks(report_type, period_start, period_end, template_id, title, overwrite, status, step_progress, created_at, updated_at) \
+         VALUES(?, ?, ?, ?, ?, ?, 'pending', '正在准备工作项...', ?, ?)",
+    )
+    .bind(&payload.report_type)
+    .bind(&period_start)
+    .bind(&period_end)
+    .bind(template.id)
+    .bind(&title)
+    .bind(payload.overwrite)
+    .bind(&now)
+    .bind(&now)
+    .execute(&state.db.pool)
+    .await?
+    .last_insert_rowid();
+
+    let unique_id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let task_dir = std::env::temp_dir().join(format!(
+        "worklog-xcli-task-{}-{}",
+        generation_task_id, unique_id
+    ));
+    std::fs::create_dir_all(&task_dir)?;
+    let work_items_file = task_dir.join("work-items.json");
+    tokio::fs::write(&work_items_file, serde_json::to_string_pretty(&logs)?).await?;
+
+    let goal = crate::xcli::build_report_goal(
+        &payload.report_type,
+        &period_start,
+        &period_end,
+        Some(&template.content),
+    );
+
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert("app".into(), "worklog".into());
+    metadata.insert("report_id".into(), generation_task_id.to_string());
+    metadata.insert(
+        "report_type".into(),
+        match payload.report_type.as_str() {
+            "daily_report" => "daily",
+            "weekly_report" => "weekly",
+            "monthly_report" => "monthly",
+            "performance_review" => "performance",
+            other => other,
+        }
+        .into(),
+    );
+
+    let (agent, agents) = if let Some(cfg) = config.as_ref() {
+        let m = cfg.model.trim();
+        if m.is_empty() {
+            (None, Vec::new())
+        } else if m.contains(',') {
+            (
+                None,
+                m.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+            )
+        } else {
+            (Some(m.to_string()), Vec::new())
+        }
+    } else {
+        (None, Vec::new())
+    };
+    let timeout_sec = config.as_ref().map(|c| c.timeout_seconds as u64);
+
+    let xcli_req = crate::xcli::XcliRequest {
+        version: 1,
+        capability: "ask".into(),
+        permission: Some("read".into()),
+        goal,
+        agent,
+        agents,
+        timeout_sec,
+        inputs: vec![work_items_file.display().to_string()],
+        schema: Some(crate::xcli::report_json_schema()),
+        metadata,
+    };
+
+    let submit_res = crate::xcli::submit_task(&xcli_path, &xcli_req).await;
+    let xcli_task_id = match submit_res {
+        Ok(id) => id,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&task_dir);
+            let now = now_string();
+            let _ = sqlx::query(
+                "UPDATE generation_tasks SET status='failed', message=?, step_progress='启动失败', updated_at=? WHERE id=?",
+            )
+            .bind(&e.message)
+            .bind(&now)
+            .bind(generation_task_id)
+            .execute(&state.db.pool)
+            .await;
+            return Err(e);
+        }
+    };
+
+    let now = now_string();
+    sqlx::query(
+        "UPDATE generation_tasks SET xcli_task_id=?, status='running', prompt_inputs=?, step_progress='任务已启动，正在规划...', updated_at=? WHERE id=?",
+    )
+    .bind(&xcli_task_id)
+    .bind(work_items_file.display().to_string())
+    .bind(&now)
+    .bind(generation_task_id)
+    .execute(&state.db.pool)
+    .await?;
+
+    let pool_clone = state.db.pool.clone();
+    let xcli_path_clone = xcli_path.clone();
+    let app_handle = app.clone();
+    let task_id_val = generation_task_id;
+    let xcli_id_val = xcli_task_id.clone();
+
+    tokio::spawn(async move {
+        let app_handle_for_progress = app_handle.clone();
+        let xcli_id_for_progress = xcli_id_val.clone();
+        let res = crate::xcli::execute_task_lifecycle(
+            &pool_clone,
+            &xcli_path_clone,
+            task_id_val,
+            move |status, progress| {
+                let _ = app_handle_for_progress.emit(
+                    "xcli:progress",
+                    serde_json::json!({
+                        "task_id": task_id_val,
+                        "xcli_task_id": xcli_id_for_progress,
+                        "status": status,
+                        "progress": progress,
+                    }),
+                );
+            },
+        )
+        .await;
+
+        let _ = std::fs::remove_dir_all(&task_dir);
+
+        match res {
+            Ok(report) => {
+                let _ = app_handle.emit(
+                    "xcli:completed",
+                    serde_json::json!({
+                        "task_id": task_id_val,
+                        "xcli_task_id": xcli_id_val,
+                        "report": report,
+                    }),
+                );
+            }
+            Err(err) => {
+                if err.code == "task_cancelled" {
+                    let _ = app_handle.emit(
+                        "xcli:cancelled",
+                        serde_json::json!({
+                            "task_id": task_id_val,
+                            "xcli_task_id": xcli_id_val,
+                        }),
+                    );
+                } else {
+                    let _ = app_handle.emit(
+                        "xcli:failed",
+                        serde_json::json!({
+                            "task_id": task_id_val,
+                            "xcli_task_id": xcli_id_val,
+                            "error": err.message,
+                        }),
+                    );
+                }
+            }
+        }
+    });
+
+    Ok(GenerationTaskStatus {
+        id: generation_task_id,
+        report_type: payload.report_type,
+        period_start,
+        period_end,
+        status: "running".into(),
+        message: None,
+        report_id: None,
+        xcli_task_id: Some(xcli_task_id),
+        last_seq: 0,
+        step_progress: Some("任务已启动，正在规划...".into()),
+        title: Some(title),
+    })
+}
+
+#[tauri::command]
+pub async fn get_active_generation_task(
+    state: State<'_, AppState>,
+) -> AppResult<Option<GenerationTaskStatus>> {
+    let task = sqlx::query_as::<_, GenerationTask>(
+        "SELECT id, report_type, period_start, period_end, status, message, report_id, completed_at, created_at, updated_at, \
+         xcli_task_id, last_seq, step_progress, prompt_inputs, template_id, title, overwrite \
+         FROM generation_tasks WHERE status IN ('pending', 'running', 'cancelling') ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_optional(&state.db.pool)
+    .await?;
+
+    Ok(task.map(|t| GenerationTaskStatus {
+        id: t.id,
+        report_type: t.report_type,
+        period_start: t.period_start,
+        period_end: t.period_end,
+        status: t.status,
+        message: t.message,
+        report_id: t.report_id,
+        xcli_task_id: t.xcli_task_id,
+        last_seq: t.last_seq.unwrap_or(0),
+        step_progress: t.step_progress,
+        title: t.title,
+    }))
+}
+
+#[tauri::command]
+pub async fn cancel_generation_task(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    task_id: i64,
+) -> AppResult<()> {
+    let config = llm::active_config(&state.db.pool, &state.secrets).await?;
+    let xcli_path = crate::xcli::resolve_xcli_path(config.as_ref());
+    crate::xcli::cancel_generation_task(&state.db.pool, &xcli_path, task_id).await?;
+    let _ = app.emit(
+        "xcli:progress",
+        serde_json::json!({
+            "task_id": task_id,
+            "status": "cancelling",
+            "progress": "正在取消任务...",
+        }),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn recover_generation_task(
+    _app: AppHandle,
+    state: State<'_, AppState>,
+    task_id: i64,
+) -> AppResult<GenerationTaskStatus> {
+    let config = llm::active_config(&state.db.pool, &state.secrets).await?;
+    let xcli_path = crate::xcli::resolve_xcli_path(config.as_ref());
+    crate::xcli::recover_active_task(&state.db.pool, &xcli_path, task_id).await
+}
+
+#[tauri::command]
+pub async fn list_active_generations(state: State<'_, AppState>) -> AppResult<Vec<String>> {
     let active = state.active_generations.lock().await;
     Ok(active.iter().cloned().collect())
 }
@@ -957,7 +1313,7 @@ pub async fn send_report_email(
 
 fn provider_defaults(provider: &str) -> AppResult<(&'static str, &'static str, i64)> {
     match provider {
-        "xcli" => Ok(("http://127.0.0.1:18741/v1", "xcli/text-default", 180)),
+        "xcli" => Ok((crate::xcli::DEFAULT_XCLI_PATH, "", 180)),
         "openai" => Ok(("https://api.openai.com/v1", "gpt-4.1-mini", 60)),
         "nvidia" => Ok((
             "https://integrate.api.nvidia.com/v1",
@@ -1052,16 +1408,24 @@ pub async fn create_llm_setting(
     let provider = payload.provider.clone();
     let defaults = provider_defaults(&provider)?;
     let base_url = clean_optional(payload.base_url).unwrap_or(defaults.0.into());
-    url::Url::parse(&base_url)
-        .map_err(|_| AppError::validation("base_url", "A valid base URL is required"))?;
-    if provider == "xcli" {
-        crate::xcli::validate_endpoint(&base_url)?;
+    if provider != "xcli" {
+        url::Url::parse(&base_url)
+            .map_err(|_| AppError::validation("base_url", "A valid base URL is required"))?;
+    } else if base_url.trim().is_empty() {
+        return Err(AppError::validation(
+            "base_url",
+            "xcli 可执行文件路径不能为空",
+        ));
     }
-    let model = require_text(
-        Some(clean_optional(payload.model).unwrap_or(defaults.1.into())),
-        "model",
-        Some(160),
-    )?;
+    let model = if provider == "xcli" {
+        clean_optional(payload.model).unwrap_or_default()
+    } else {
+        require_text(
+            Some(clean_optional(payload.model).unwrap_or(defaults.1.into())),
+            "model",
+            Some(160),
+        )?
+    };
     let timeout_seconds = payload.timeout_seconds.unwrap_or(defaults.2);
     if !(5..=600).contains(&timeout_seconds) {
         return Err(AppError::validation(
@@ -1123,25 +1487,33 @@ pub async fn update_llm_setting(
     let current = load_llm_row(&state, id).await?;
     let defaults = provider_defaults(&payload.provider)?;
     let base_url = clean_optional(payload.base_url).unwrap_or(defaults.0.into());
-    url::Url::parse(&base_url)
-        .map_err(|_| AppError::validation("base_url", "A valid base URL is required"))?;
-    if payload.provider == "xcli" {
-        crate::xcli::validate_endpoint(&base_url)?;
+    if payload.provider != "xcli" {
+        url::Url::parse(&base_url)
+            .map_err(|_| AppError::validation("base_url", "A valid base URL is required"))?;
+    } else if base_url.trim().is_empty() {
+        return Err(AppError::validation(
+            "base_url",
+            "xcli 可执行文件路径不能为空",
+        ));
     }
     if current.provider != payload.provider
-        && (current.provider == "xcli" || payload.provider == "xcli")
+        && current.provider == "xcli"
         && payload
             .api_key
             .as_deref()
             .is_none_or(|key| key.trim().is_empty() || is_masked(key))
     {
-        return Err(AppError::validation("api_key", "Switching to or from xcli requires an independent token; create a separate provider configuration"));
+        return Err(AppError::validation("api_key", "Switching from xcli requires an independent token; create a separate provider configuration"));
     }
-    let model = require_text(
-        Some(clean_optional(payload.model).unwrap_or(defaults.1.into())),
-        "model",
-        Some(160),
-    )?;
+    let model = if payload.provider == "xcli" {
+        clean_optional(payload.model).unwrap_or_default()
+    } else {
+        require_text(
+            Some(clean_optional(payload.model).unwrap_or(defaults.1.into())),
+            "model",
+            Some(160),
+        )?
+    };
     let timeout_seconds = payload.timeout_seconds.unwrap_or(defaults.2);
     if !(5..=600).contains(&timeout_seconds) {
         return Err(AppError::validation(
@@ -1829,7 +2201,7 @@ mod tests {
         assert!(provider_defaults("unsupported").is_err());
         assert_eq!(
             provider_defaults("xcli").unwrap(),
-            ("http://127.0.0.1:18741/v1", "xcli/text-default", 180)
+            (crate::xcli::DEFAULT_XCLI_PATH, "", 180)
         );
     }
 

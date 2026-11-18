@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+const DEFAULT_DAILY: &str = "# {{ title }}\n\n日期：{{ period_start }}\n\n{{ ai_content }}\n\n## 原始工作记录\n\n{{ work_items }}\n";
 const DEFAULT_WEEKLY: &str = "# {{ title }}\n\n周期：{{ period_start }} - {{ period_end }}\n\n{{ ai_content }}\n\n## 原始工作记录\n\n{{ work_items }}\n";
 const DEFAULT_MONTHLY: &str = "# {{ title }}\n\n周期：{{ period_start }} - {{ period_end }}\n\n{{ ai_content }}\n\n## 关键成果\n\n{{ highlights }}\n\n## 原始工作记录\n\n{{ work_items }}\n";
 const DEFAULT_PERFORMANCE: &str = "# {{ title }}\n\n考核周期：{{ period_start }} - {{ period_end }}\n\n{{ ai_content }}\n\n## 贡献证据\n\n{{ highlights }}\n\n## 可改进事项\n\n{{ blockers }}\n";
@@ -235,6 +236,27 @@ async fn ensure_legacy_columns(pool: &SqlitePool) -> AppResult<()> {
         .execute(pool)
         .await?;
 
+    // Ensure xcli is seeded in llm_settings if missing
+    let has_xcli: bool =
+        sqlx::query_scalar("SELECT COUNT(*) > 0 FROM llm_settings WHERE provider = 'xcli'")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(false);
+    if !has_xcli {
+        let xcli_path = crate::xcli::resolve_xcli_path(None);
+        let path_str = xcli_path.to_str().unwrap_or(crate::xcli::DEFAULT_XCLI_PATH);
+        let now = now_string();
+        let _ = sqlx::query(
+            "INSERT INTO llm_settings (provider, base_url, model, api_key, extra_headers, timeout_seconds, is_active, created_at, updated_at) \
+             VALUES ('xcli', ?, '', '', '{}', 180, 0, ?, ?)",
+        )
+        .bind(path_str)
+        .bind(&now)
+        .bind(&now)
+        .execute(pool)
+        .await;
+    }
+
     // Normalize auto-captured work logs where all evidence on that date belongs to a single project
     sqlx::query(
         "UPDATE work_logs SET project = (
@@ -255,6 +277,36 @@ async fn ensure_legacy_columns(pool: &SqlitePool) -> AppResult<()> {
         .execute(pool)
         .await?;
 
+    let task_columns = table_columns(pool, "generation_tasks").await?;
+    if !task_columns.is_empty() && !task_columns.contains("xcli_task_id") {
+        let _ = sqlx::query("ALTER TABLE generation_tasks ADD COLUMN xcli_task_id TEXT")
+            .execute(pool)
+            .await;
+        let _ = sqlx::query(
+            "ALTER TABLE generation_tasks ADD COLUMN last_seq INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(pool)
+        .await;
+        let _ = sqlx::query("ALTER TABLE generation_tasks ADD COLUMN step_progress TEXT")
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE generation_tasks ADD COLUMN prompt_inputs TEXT")
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE generation_tasks ADD COLUMN template_id INTEGER")
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE generation_tasks ADD COLUMN title TEXT")
+            .execute(pool)
+            .await;
+        let _ = sqlx::query(
+            "ALTER TABLE generation_tasks ADD COLUMN overwrite BOOLEAN NOT NULL DEFAULT 0",
+        )
+        .execute(pool)
+        .await;
+        let _ = sqlx::query("CREATE INDEX IF NOT EXISTS ix_generation_tasks_xcli_task_id ON generation_tasks(xcli_task_id)").execute(pool).await;
+    }
+
     Ok(())
 }
 
@@ -270,6 +322,7 @@ async fn table_columns(pool: &SqlitePool, table: &str) -> AppResult<HashSet<Stri
 async fn seed_defaults(pool: &SqlitePool) -> AppResult<()> {
     let now = now_string();
     let templates = [
+        ("daily_report", "默认日报模板", DEFAULT_DAILY),
         ("weekly_report", "默认周报模板", DEFAULT_WEEKLY),
         ("monthly_report", "默认月报模板", DEFAULT_MONTHLY),
         (
@@ -294,6 +347,7 @@ async fn seed_defaults(pool: &SqlitePool) -> AppResult<()> {
     }
 
     let schedules = [
+        ("daily_report", None),
         ("weekly_report", Some("fri")),
         ("monthly_report", None),
         ("performance_review", None),
@@ -447,8 +501,8 @@ mod tests {
             .fetch_one(&database.pool)
             .await
             .unwrap();
-        assert_eq!(templates, 3);
-        assert_eq!(schedules, 3);
+        assert_eq!(templates, 4);
+        assert_eq!(schedules, 4);
         let capture_settings: (bool, String, String, i64) = sqlx::query_as(
             "SELECT enabled, run_time, timezone, lookback_days FROM daily_capture_settings WHERE id=1",
         )
