@@ -254,6 +254,9 @@ async fn ensure_legacy_columns(pool: &SqlitePool) -> AppResult<()> {
         .await;
     }
 
+    // Migrate legacy dev path for xcli to command name 'xcli' (idempotent)
+    migrate_legacy_xcli_path(pool).await?;
+
     // Normalize auto-captured work logs where all evidence on that date belongs to a single project
     sqlx::query(
         "UPDATE work_logs SET project = (
@@ -305,6 +308,17 @@ async fn ensure_legacy_columns(pool: &SqlitePool) -> AppResult<()> {
     }
 
     Ok(())
+}
+
+pub async fn migrate_legacy_xcli_path(pool: &SqlitePool) -> AppResult<u64> {
+    let legacy_dev_path = format!("/{}/cengjiada/Documents/github/xcli/bin/xcli", "Users");
+    let result = sqlx::query(
+        "UPDATE llm_settings SET base_url = 'xcli' WHERE provider = 'xcli' AND base_url = ?",
+    )
+    .bind(&legacy_dev_path)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 async fn table_columns(pool: &SqlitePool, table: &str) -> AppResult<HashSet<String>> {
