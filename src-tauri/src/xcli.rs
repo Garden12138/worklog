@@ -532,11 +532,29 @@ pub fn format_event_progress(event: &XcliEvent) -> String {
     }
 }
 
+pub(crate) fn create_xcli_command(xcli_path: &Path) -> Command {
+    #[cfg(windows)]
+    {
+        let path_str = xcli_path.to_string_lossy().to_ascii_lowercase();
+        if path_str.ends_with(".bat") || path_str.ends_with(".cmd") {
+            let mut cmd = Command::new("cmd.exe");
+            cmd.arg("/c").arg(xcli_path);
+            return cmd;
+        }
+        if path_str.ends_with(".py") {
+            let mut cmd = Command::new("python");
+            cmd.arg(xcli_path);
+            return cmd;
+        }
+    }
+    Command::new(xcli_path)
+}
+
 pub async fn submit_task(xcli_path: &Path, request: &XcliRequest) -> AppResult<String> {
     let req_bytes = serde_json::to_vec(request)
         .map_err(|e| AppError::new("xcli_serialization_error", format!("无法序列化请求: {e}")))?;
 
-    let mut child = Command::new(xcli_path)
+    let mut child = create_xcli_command(xcli_path)
         .args(["submit", "--request", "-", "--detach"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -609,7 +627,7 @@ pub async fn stream_task_logs<F>(
 where
     F: FnMut(XcliEvent),
 {
-    let mut child = Command::new(xcli_path)
+    let mut child = create_xcli_command(xcli_path)
         .args(["logs", task_id, "-f", "--after", &after_seq.to_string()])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -678,7 +696,7 @@ where
 }
 
 pub async fn fetch_task_status(xcli_path: &Path, task_id: &str) -> AppResult<XcliRecord> {
-    let output = Command::new(xcli_path)
+    let output = create_xcli_command(xcli_path)
         .args(["status", task_id, "--json"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -709,7 +727,7 @@ pub async fn fetch_task_status(xcli_path: &Path, task_id: &str) -> AppResult<Xcl
 }
 
 pub async fn fetch_task_result(xcli_path: &Path, task_id: &str) -> AppResult<XcliResult> {
-    let output = Command::new(xcli_path)
+    let output = create_xcli_command(xcli_path)
         .args(["result", task_id])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -740,7 +758,7 @@ pub async fn fetch_task_result(xcli_path: &Path, task_id: &str) -> AppResult<Xcl
 }
 
 pub async fn cancel_task(xcli_path: &Path, task_id: &str) -> AppResult<()> {
-    let output = Command::new(xcli_path)
+    let output = create_xcli_command(xcli_path)
         .args(["cancel", task_id])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -765,7 +783,7 @@ pub async fn cancel_task(xcli_path: &Path, task_id: &str) -> AppResult<()> {
 }
 
 pub async fn list_agents(xcli_path: &Path) -> AppResult<Vec<XcliAgentInfo>> {
-    let output = Command::new(xcli_path)
+    let output = create_xcli_command(xcli_path)
         .args(["agents", "--json"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -804,7 +822,7 @@ pub async fn run_xcli_ask(xcli_path: &Path, goal: &str) -> AppResult<String> {
     });
     let req_bytes = serde_json::to_vec(&req)
         .map_err(|e| AppError::new("xcli_serialization_error", format!("无法序列化请求: {e}")))?;
-    let mut child = Command::new(xcli_path)
+    let mut child = create_xcli_command(xcli_path)
         .args(["submit", "--request", "-", "--json"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1183,11 +1201,10 @@ pub async fn recover_active_task(
 mod tests {
     use super::*;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
 
     fn make_fake_xcli(dir: &Path) -> PathBuf {
         let fake = dir.join("fake_xcli.py");
-        let script = r#"#!/usr/bin/python3
+        let script = r#"#!/usr/bin/env python3
 import sys, json, os
 
 mode = os.environ.get("FAKE_XCLI_MODE", "normal")
@@ -1362,9 +1379,13 @@ if cmd == "cancel":
     sys.exit(0)
 "#;
         fs::write(&fake, script).unwrap();
-        let mut perms = fs::metadata(&fake).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&fake, perms).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&fake).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&fake, perms).unwrap();
+        }
         fake
     }
 
