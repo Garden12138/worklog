@@ -543,6 +543,8 @@ pub(crate) fn create_xcli_command(xcli_path: &Path) -> Command {
         }
         if path_str.ends_with(".py") {
             let mut cmd = Command::new("python");
+            cmd.env("PYTHONIOENCODING", "utf-8");
+            cmd.env("PYTHONUTF8", "1");
             cmd.arg(xcli_path);
             return cmd;
         }
@@ -1207,6 +1209,17 @@ mod tests {
         let script = r#"#!/usr/bin/env python3
 import sys, json, os
 
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 mode = os.environ.get("FAKE_XCLI_MODE", "normal")
 args = sys.argv[1:]
 
@@ -1239,7 +1252,7 @@ if cmd == "submit":
     assert req["schema"]["additionalProperties"] is False
     rec_file = os.environ.get("FAKE_XCLI_REQ_RECORD")
     if rec_file:
-        with open(rec_file, "w") as f:
+        with open(rec_file, "w", encoding="utf-8") as f:
             f.write(raw)
     print(json.dumps({"task_id": "t-fake-task-123"}))
     sys.exit(0)
@@ -1373,9 +1386,9 @@ if cmd == "cancel":
     task_id = args[1]
     rec = os.environ.get("FAKE_XCLI_CANCEL_RECORD")
     if rec:
-        with open(rec, "w") as f:
+        with open(rec, "w", encoding="utf-8") as f:
             f.write(task_id)
-    print("已发送取消信号：" + task_id)
+    print("cancelled: " + task_id)
     sys.exit(0)
 "#;
         fs::write(&fake, script).unwrap();
